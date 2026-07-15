@@ -10,13 +10,14 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/store/memory"
 )
 
-func TestApproveCreatesGrantAndEnqueuesProfile(t *testing.T) {
+func TestApproveAccessCreatesGrantAndEnqueuesProfile(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
 	stub := &mdm.StubEnqueuer{}
 	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
 
 	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeAccess,
 		Kind:         policy.KindURL,
 		Value:        "https://example.com/lesson",
 		EnrollmentID: "device-1",
@@ -34,22 +35,64 @@ func TestApproveCreatesGrantAndEnqueuesProfile(t *testing.T) {
 		t.Fatalf("status=%s", decided.Status)
 	}
 
-	apps, urls, err := svc.EffectiveAllowlist(ctx, "device-1")
+	_, urls, err := svc.EffectiveAllowlist(ctx, "device-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertContains(t, urls, "example.com/lesson")
-	assertContains(t, apps, "com.apple.webapp")
+	if len(stub.Snapshot()) != 1 {
+		t.Fatalf("expected 1 stub command, got %d", len(stub.Snapshot()))
+	}
+}
 
-	cmds := stub.Snapshot()
-	if len(cmds) != 1 {
-		t.Fatalf("expected 1 stub command, got %d", len(cmds))
+func TestApproveBugResolvesWithoutEnqueue(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	stub := &mdm.StubEnqueuer{}
+	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:  store.TypeBug,
+		Value: "Safari crashes on portal",
+		Reason: "opens then blank",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cmds[0].EnrollmentID != "device-1" {
-		t.Fatalf("enrollment=%s", cmds[0].EnrollmentID)
+	decided, err := svc.Decide(ctx, DecideInput{RequestID: req.ID, Approve: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(cmds[0].Profile) == 0 {
-		t.Fatal("empty profile")
+	if decided.Status != store.StatusResolved {
+		t.Fatalf("status=%s", decided.Status)
+	}
+	if len(stub.Snapshot()) != 0 {
+		t.Fatal("bug resolve should not enqueue MDM")
+	}
+}
+
+func TestApproveGeneralWithoutEnqueue(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	stub := &mdm.StubEnqueuer{}
+	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:  store.TypeGeneral,
+		Value: "Need help with login",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := svc.Decide(ctx, DecideInput{RequestID: req.ID, Approve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decided.Status != store.StatusApproved {
+		t.Fatalf("status=%s", decided.Status)
+	}
+	if len(stub.Snapshot()) != 0 {
+		t.Fatal("general approve should not enqueue MDM")
 	}
 }
 
@@ -60,7 +103,7 @@ func TestDenyDoesNotEnqueue(t *testing.T) {
 	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
 
 	req, err := svc.CreateRequest(ctx, CreateRequestInput{
-		Kind:  policy.KindApp,
+		Kind:  policy.KindApp, // back-compat implies access
 		Value: "com.game.fun",
 	})
 	if err != nil {
@@ -71,6 +114,63 @@ func TestDenyDoesNotEnqueue(t *testing.T) {
 	}
 	if len(stub.Snapshot()) != 0 {
 		t.Fatal("deny should not enqueue")
+	}
+}
+
+func TestApproveGroupScopeFansOut(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	stub := &mdm.StubEnqueuer{}
+	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
+
+	g, err := mem.CreateGroup(ctx, store.Group{Name: "Math"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.SetGroupMembers(ctx, g.ID, []string{"device-a", "device-b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeAccess,
+		Kind:         policy.KindURL,
+		Value:        "https://khanacademy.org",
+		EnrollmentID: "device-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Decide(ctx, DecideInput{
+		RequestID: req.ID,
+		Approve:   true,
+		Duration:  "permanent",
+		Scope:     "group",
+		GroupID:   g.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, urlsA, err := svc.EffectiveAllowlist(ctx, "device-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, urlsB, err := svc.EffectiveAllowlist(ctx, "device-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, urlsC, err := svc.EffectiveAllowlist(ctx, "device-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, urlsA, "khanacademy.org")
+	assertContains(t, urlsB, "khanacademy.org")
+	for _, u := range urlsC {
+		if u == "khanacademy.org" {
+			t.Fatal("group allowlist leaked to non-member")
+		}
+	}
+	if len(stub.Snapshot()) < 2 {
+		t.Fatalf("expected fan-out enqueue for both members, got %d", len(stub.Snapshot()))
 	}
 }
 

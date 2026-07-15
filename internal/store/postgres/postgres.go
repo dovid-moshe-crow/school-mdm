@@ -3,6 +3,9 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,12 +46,55 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 func (s *Store) Kind() string                    { return "postgres" }
 
 func (s *Store) migrate(ctx context.Context) error {
-	sqlBytes, err := migrations.SQL.ReadFile("001_init.sql")
-	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
+	// Ensure tracking table exists before reading filenames (bootstrapped by 001 too).
+	if _, err := s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			filename TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, string(sqlBytes)); err != nil {
-		return fmt.Errorf("apply migration: %w", err)
+
+	entries, err := fs.ReadDir(migrations.SQL, ".")
+	if err != nil {
+		return fmt.Errorf("list migrations: %w", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename=$1)`, name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		sqlBytes, err := migrations.SQL.ReadFile(name)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("apply %s: %w", name, err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (filename) VALUES ($1)`, name); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("record %s: %w", name, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -56,9 +102,9 @@ func (s *Store) migrate(ctx context.Context) error {
 func (s *Store) seedEssentials(ctx context.Context) error {
 	for _, app := range policy.Essentials {
 		if err := s.UpsertAllowlist(ctx, policy.Entry{
-			Kind:  policy.KindApp,
-			Value: app,
-			Scope: "global",
+			Kind:   policy.KindApp,
+			Value:  app,
+			Target: policy.Target{Type: policy.TargetGlobal},
 		}); err != nil {
 			return err
 		}
@@ -66,8 +112,17 @@ func (s *Store) seedEssentials(ctx context.Context) error {
 	return nil
 }
 
+func normalizeTarget(t *policy.Target) {
+	if t.Type == "" {
+		t.Type = policy.TargetGlobal
+	}
+	if t.Type == policy.TargetGlobal {
+		t.ID = ""
+	}
+}
+
 func (s *Store) ListAllowlist(ctx context.Context) ([]policy.Entry, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, kind, value, scope FROM allowlist_entries`)
+	rows, err := s.pool.Query(ctx, `SELECT id, kind, value, target_type, target_id FROM allowlist_entries`)
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +130,12 @@ func (s *Store) ListAllowlist(ctx context.Context) ([]policy.Entry, error) {
 	var out []policy.Entry
 	for rows.Next() {
 		var e policy.Entry
-		var kind string
-		if err := rows.Scan(&e.ID, &kind, &e.Value, &e.Scope); err != nil {
+		var kind, tt string
+		if err := rows.Scan(&e.ID, &kind, &e.Value, &tt, &e.Target.ID); err != nil {
 			return nil, err
 		}
 		e.Kind = policy.Kind(kind)
+		e.Target.Type = policy.TargetType(tt)
 		out = append(out, e)
 	}
 	return out, rows.Err()
@@ -87,22 +143,20 @@ func (s *Store) ListAllowlist(ctx context.Context) ([]policy.Entry, error) {
 
 func (s *Store) UpsertAllowlist(ctx context.Context, entry policy.Entry) error {
 	entry.Value = policy.Normalize(entry.Kind, entry.Value)
-	if entry.Scope == "" {
-		entry.Scope = "global"
-	}
+	normalizeTarget(&entry.Target)
 	if entry.ID == "" {
 		entry.ID = uuid.NewString()
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO allowlist_entries (id, kind, value, scope)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (kind, value, scope) DO UPDATE SET value = EXCLUDED.value
-	`, entry.ID, string(entry.Kind), entry.Value, entry.Scope)
+		INSERT INTO allowlist_entries (id, kind, value, target_type, target_id)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (kind, value, target_type, target_id) DO UPDATE SET value = EXCLUDED.value
+	`, entry.ID, string(entry.Kind), entry.Value, string(entry.Target.Type), entry.Target.ID)
 	return err
 }
 
 func (s *Store) ListGrants(ctx context.Context) ([]policy.Grant, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, kind, value, enrollment_id, expires_at FROM grants`)
+	rows, err := s.pool.Query(ctx, `SELECT id, kind, value, target_type, target_id, expires_at FROM grants`)
 	if err != nil {
 		return nil, err
 	}
@@ -110,12 +164,13 @@ func (s *Store) ListGrants(ctx context.Context) ([]policy.Grant, error) {
 	var out []policy.Grant
 	for rows.Next() {
 		var g policy.Grant
-		var kind string
+		var kind, tt string
 		var exp *time.Time
-		if err := rows.Scan(&g.ID, &kind, &g.Value, &g.EnrollmentID, &exp); err != nil {
+		if err := rows.Scan(&g.ID, &kind, &g.Value, &tt, &g.Target.ID, &exp); err != nil {
 			return nil, err
 		}
 		g.Kind = policy.Kind(kind)
+		g.Target.Type = policy.TargetType(tt)
 		g.ExpiresAt = exp
 		out = append(out, g)
 	}
@@ -127,18 +182,18 @@ func (s *Store) AddGrant(ctx context.Context, grant policy.Grant) error {
 		grant.ID = uuid.NewString()
 	}
 	grant.Value = policy.Normalize(grant.Kind, grant.Value)
+	normalizeTarget(&grant.Target)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO grants (id, kind, value, enrollment_id, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
-	`, grant.ID, string(grant.Kind), grant.Value, grant.EnrollmentID, grant.ExpiresAt)
+		INSERT INTO grants (id, kind, value, target_type, target_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, grant.ID, string(grant.Kind), grant.Value, string(grant.Target.Type), grant.Target.ID, grant.ExpiresAt)
 	return err
 }
 
-func (s *Store) CreateRequest(ctx context.Context, req store.AccessRequest) (store.AccessRequest, error) {
+func (s *Store) CreateRequest(ctx context.Context, req store.Request) (store.Request, error) {
 	if req.ID == "" {
 		req.ID = uuid.NewString()
 	}
-	req.Value = policy.Normalize(req.Kind, req.Value)
 	if req.Status == "" {
 		req.Status = store.StatusPending
 	}
@@ -146,41 +201,41 @@ func (s *Store) CreateRequest(ctx context.Context, req store.AccessRequest) (sto
 		req.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO access_requests (id, kind, value, enrollment_id, reason, status, duration, created_at, decided_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`, req.ID, string(req.Kind), req.Value, req.EnrollmentID, req.Reason, string(req.Status), req.Duration, req.CreatedAt, req.DecidedAt)
+		INSERT INTO requests (id, type, target_kind, value, enrollment_id, reason, status, duration, created_at, decided_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+	`, req.ID, string(req.Type), string(req.TargetKind), req.Value, req.EnrollmentID, req.Reason, string(req.Status), req.Duration, req.CreatedAt, req.DecidedAt)
 	return req, err
 }
 
-func (s *Store) GetRequest(ctx context.Context, id string) (store.AccessRequest, error) {
+func (s *Store) GetRequest(ctx context.Context, id string) (store.Request, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, kind, value, enrollment_id, reason, status, duration, created_at, decided_at
-		FROM access_requests WHERE id=$1
+		SELECT id, type, target_kind, value, enrollment_id, reason, status, duration, created_at, decided_at
+		FROM requests WHERE id=$1
 	`, id)
 	req, err := scanRequest(row)
 	if err == pgx.ErrNoRows {
-		return store.AccessRequest{}, fmt.Errorf("request %s: %w", id, store.ErrNotFound)
+		return store.Request{}, fmt.Errorf("request %s: %w", id, store.ErrNotFound)
 	}
 	return req, err
 }
 
-func (s *Store) ListRequests(ctx context.Context, status *store.RequestStatus) ([]store.AccessRequest, error) {
+func (s *Store) ListRequests(ctx context.Context, status *store.RequestStatus) ([]store.Request, error) {
 	var rows pgx.Rows
 	var err error
 	if status == nil {
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, kind, value, enrollment_id, reason, status, duration, created_at, decided_at
-			FROM access_requests ORDER BY created_at DESC`)
+			SELECT id, type, target_kind, value, enrollment_id, reason, status, duration, created_at, decided_at
+			FROM requests ORDER BY created_at DESC`)
 	} else {
 		rows, err = s.pool.Query(ctx, `
-			SELECT id, kind, value, enrollment_id, reason, status, duration, created_at, decided_at
-			FROM access_requests WHERE status=$1 ORDER BY created_at DESC`, string(*status))
+			SELECT id, type, target_kind, value, enrollment_id, reason, status, duration, created_at, decided_at
+			FROM requests WHERE status=$1 ORDER BY created_at DESC`, string(*status))
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []store.AccessRequest
+	var out []store.Request
 	for rows.Next() {
 		req, err := scanRequest(rows)
 		if err != nil {
@@ -191,12 +246,12 @@ func (s *Store) ListRequests(ctx context.Context, status *store.RequestStatus) (
 	return out, rows.Err()
 }
 
-func (s *Store) UpdateRequest(ctx context.Context, req store.AccessRequest) error {
+func (s *Store) UpdateRequest(ctx context.Context, req store.Request) error {
 	ct, err := s.pool.Exec(ctx, `
-		UPDATE access_requests
-		SET kind=$2, value=$3, enrollment_id=$4, reason=$5, status=$6, duration=$7, decided_at=$8
+		UPDATE requests
+		SET type=$2, target_kind=$3, value=$4, enrollment_id=$5, reason=$6, status=$7, duration=$8, decided_at=$9
 		WHERE id=$1
-	`, req.ID, string(req.Kind), req.Value, req.EnrollmentID, req.Reason, string(req.Status), req.Duration, req.DecidedAt)
+	`, req.ID, string(req.Type), string(req.TargetKind), req.Value, req.EnrollmentID, req.Reason, string(req.Status), req.Duration, req.DecidedAt)
 	if err != nil {
 		return err
 	}
@@ -210,13 +265,271 @@ type scannable interface {
 	Scan(dest ...any) error
 }
 
-func scanRequest(row scannable) (store.AccessRequest, error) {
-	var req store.AccessRequest
-	var kind, status string
-	if err := row.Scan(&req.ID, &kind, &req.Value, &req.EnrollmentID, &req.Reason, &status, &req.Duration, &req.CreatedAt, &req.DecidedAt); err != nil {
-		return store.AccessRequest{}, err
+func scanRequest(row scannable) (store.Request, error) {
+	var req store.Request
+	var typ, target, status string
+	if err := row.Scan(&req.ID, &typ, &target, &req.Value, &req.EnrollmentID, &req.Reason, &status, &req.Duration, &req.CreatedAt, &req.DecidedAt); err != nil {
+		return store.Request{}, err
 	}
-	req.Kind = policy.Kind(kind)
+	req.Type = store.RequestType(typ)
+	req.TargetKind = policy.Kind(target)
 	req.Status = store.RequestStatus(status)
 	return req, nil
+}
+
+func (s *Store) GetAppMeta(ctx context.Context, bundleID string) (store.AppMeta, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at
+		FROM app_metadata WHERE bundle_id=$1
+	`, strings.ToLower(strings.TrimSpace(bundleID)))
+	var m store.AppMeta
+	if err := row.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			return store.AppMeta{}, fmt.Errorf("app %s: %w", bundleID, store.ErrNotFound)
+		}
+		return store.AppMeta{}, err
+	}
+	return m, nil
+}
+
+func (s *Store) UpsertAppMeta(ctx context.Context, meta store.AppMeta) error {
+	meta.BundleID = strings.ToLower(strings.TrimSpace(meta.BundleID))
+	if meta.BundleID == "" {
+		return fmt.Errorf("bundle_id is required")
+	}
+	if meta.UpdatedAt.IsZero() {
+		meta.UpdatedAt = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO app_metadata (bundle_id, track_id, name, artist, artwork_url, store_url, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (bundle_id) DO UPDATE SET
+			track_id = EXCLUDED.track_id,
+			name = EXCLUDED.name,
+			artist = EXCLUDED.artist,
+			artwork_url = EXCLUDED.artwork_url,
+			store_url = EXCLUDED.store_url,
+			updated_at = EXCLUDED.updated_at
+	`, meta.BundleID, meta.TrackID, meta.Name, meta.Artist, meta.ArtworkURL, meta.StoreURL, meta.UpdatedAt)
+	return err
+}
+
+func (s *Store) SearchAppMeta(ctx context.Context, query string, limit int) ([]store.AppMeta, error) {
+	if limit <= 0 {
+		limit = 12
+	}
+	q := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
+	rows, err := s.pool.Query(ctx, `
+		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at
+		FROM app_metadata
+		WHERE lower(name) LIKE $1 OR lower(artist) LIKE $1 OR bundle_id LIKE $1
+		ORDER BY name ASC
+		LIMIT $2
+	`, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.AppMeta
+	for rows.Next() {
+		var m store.AppMeta
+		if err := rows.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListGroups(ctx context.Context) ([]store.Group, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, name, description, created_at FROM groups ORDER BY name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Group
+	for rows.Next() {
+		var g store.Group
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetGroup(ctx context.Context, id string) (store.Group, error) {
+	var g store.Group
+	err := s.pool.QueryRow(ctx, `SELECT id, name, description, created_at FROM groups WHERE id=$1`, id).
+		Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return store.Group{}, fmt.Errorf("group %s: %w", id, store.ErrNotFound)
+	}
+	return g, err
+}
+
+func (s *Store) CreateGroup(ctx context.Context, g store.Group) (store.Group, error) {
+	g.Name = strings.TrimSpace(g.Name)
+	if g.Name == "" {
+		return store.Group{}, fmt.Errorf("group name is required")
+	}
+	if g.ID == "" {
+		g.ID = uuid.NewString()
+	}
+	if g.CreatedAt.IsZero() {
+		g.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO groups (id, name, description, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, g.ID, g.Name, g.Description, g.CreatedAt)
+	return g, err
+}
+
+func (s *Store) UpdateGroup(ctx context.Context, g store.Group) error {
+	g.Name = strings.TrimSpace(g.Name)
+	if g.Name == "" {
+		return fmt.Errorf("group name is required")
+	}
+	ct, err := s.pool.Exec(ctx, `
+		UPDATE groups SET name=$2, description=$3 WHERE id=$1
+	`, g.ID, g.Name, g.Description)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("group %s: %w", g.ID, store.ErrNotFound)
+	}
+	return nil
+}
+
+func (s *Store) DeleteGroup(ctx context.Context, id string) error {
+	ct, err := s.pool.Exec(ctx, `DELETE FROM groups WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("group %s: %w", id, store.ErrNotFound)
+	}
+	return nil
+}
+
+func (s *Store) ListGroupMembers(ctx context.Context, groupID string) ([]string, error) {
+	if _, err := s.GetGroup(ctx, groupID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT enrollment_id FROM group_members WHERE group_id=$1 ORDER BY enrollment_id`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetGroupMembers(ctx context.Context, groupID string, enrollmentIDs []string) error {
+	if _, err := s.GetGroup(ctx, groupID); err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM group_members WHERE group_id=$1`, groupID); err != nil {
+		return err
+	}
+	for _, id := range enrollmentIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO group_members (group_id, enrollment_id) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, groupID, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) AddGroupMember(ctx context.Context, groupID, enrollmentID string) error {
+	if _, err := s.GetGroup(ctx, groupID); err != nil {
+		return err
+	}
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return fmt.Errorf("enrollment_id is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO group_members (group_id, enrollment_id) VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+	`, groupID, enrollmentID)
+	return err
+}
+
+func (s *Store) RemoveGroupMember(ctx context.Context, groupID, enrollmentID string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM group_members WHERE group_id=$1 AND enrollment_id=$2
+	`, groupID, strings.TrimSpace(enrollmentID))
+	return err
+}
+
+func (s *Store) ListGroupsForDevice(ctx context.Context, enrollmentID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT group_id FROM group_members WHERE enrollment_id=$1
+	`, strings.TrimSpace(enrollmentID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListEnrollmentIDsForGroup(ctx context.Context, groupID string) ([]string, error) {
+	return s.ListGroupMembers(ctx, groupID)
+}
+
+func (s *Store) ListAllEnrollmentIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT enrollment_id FROM (
+			SELECT enrollment_id FROM requests WHERE enrollment_id <> ''
+			UNION
+			SELECT target_id FROM grants WHERE target_type='device' AND target_id <> ''
+			UNION
+			SELECT target_id FROM allowlist_entries WHERE target_type='device' AND target_id <> ''
+			UNION
+			SELECT enrollment_id FROM group_members
+		) t
+		ORDER BY enrollment_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

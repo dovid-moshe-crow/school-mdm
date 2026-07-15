@@ -15,21 +15,36 @@ const (
 	KindURL Kind = "url"
 )
 
+// TargetType is where an allowlist row or grant applies.
+type TargetType string
+
+const (
+	TargetGlobal TargetType = "global"
+	TargetGroup  TargetType = "group"
+	TargetDevice TargetType = "device"
+)
+
+// Target identifies the scope of an allowlist or grant.
+type Target struct {
+	Type TargetType `json:"target_type"`
+	ID   string     `json:"target_id"` // empty for global; group UUID or enrollment_id otherwise
+}
+
 // Entry is a durable allowlist item.
 type Entry struct {
-	ID    string
-	Kind  Kind
-	Value string
-	Scope string // e.g. "global"
+	ID     string `json:"id"`
+	Kind   Kind   `json:"kind"`
+	Value  string `json:"value"`
+	Target Target `json:"target"`
 }
 
 // Grant is a time-boxed allowlist addition.
 type Grant struct {
-	ID           string
-	Kind         Kind
-	Value        string
-	EnrollmentID string
-	ExpiresAt    *time.Time
+	ID        string     `json:"id"`
+	Kind      Kind       `json:"kind"`
+	Value     string     `json:"value"`
+	Target    Target     `json:"target"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // Essentials are always merged into the app allowlist so students are not stranded.
@@ -38,42 +53,60 @@ var Essentials = []string{
 	"com.apple.webapp",
 }
 
-// Effective computes the allowlists at now for an optional enrollment.
-func Effective(base []Entry, grants []Grant, enrollmentID string, now time.Time) (apps []string, urls []string) {
+// Applies reports whether target applies to enrollmentID given its group memberships.
+func (t Target) Applies(enrollmentID string, groupIDs []string) bool {
+	switch t.Type {
+	case TargetGlobal, "":
+		return true
+	case TargetDevice:
+		return enrollmentID != "" && t.ID == enrollmentID
+	case TargetGroup:
+		if t.ID == "" {
+			return false
+		}
+		for _, g := range groupIDs {
+			if g == t.ID {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// Effective computes allowlists: essentials ∪ global ∪ groups ∪ device (+ non-expired grants).
+func Effective(base []Entry, grants []Grant, groupIDs []string, enrollmentID string, now time.Time) (apps []string, urls []string) {
 	appSet := map[string]struct{}{}
 	urlSet := map[string]struct{}{}
 
-	for _, e := range Essentials {
-		appSet[e] = struct{}{}
-	}
-	for _, e := range base {
-		v := Normalize(e.Kind, e.Value)
+	add := func(kind Kind, value string) {
+		v := Normalize(kind, value)
 		if v == "" {
-			continue
+			return
 		}
-		switch e.Kind {
+		switch kind {
 		case KindApp:
 			appSet[v] = struct{}{}
 		case KindURL:
 			urlSet[v] = struct{}{}
+		}
+	}
+
+	for _, e := range Essentials {
+		add(KindApp, e)
+	}
+	for _, e := range base {
+		if e.Target.Applies(enrollmentID, groupIDs) {
+			add(e.Kind, e.Value)
 		}
 	}
 	for _, g := range grants {
 		if g.ExpiresAt != nil && !g.ExpiresAt.After(now) {
 			continue
 		}
-		if g.EnrollmentID != "" && enrollmentID != "" && g.EnrollmentID != enrollmentID {
-			continue
-		}
-		v := Normalize(g.Kind, g.Value)
-		if v == "" {
-			continue
-		}
-		switch g.Kind {
-		case KindApp:
-			appSet[v] = struct{}{}
-		case KindURL:
-			urlSet[v] = struct{}{}
+		if g.Target.Applies(enrollmentID, groupIDs) {
+			add(g.Kind, g.Value)
 		}
 	}
 	return sortedKeys(appSet), sortedKeys(urlSet)
@@ -105,7 +138,6 @@ func normalizeURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		// fall back to trimmed lowercase path-ish string
 		return strings.ToLower(strings.TrimRight(raw, "/"))
 	}
 	host := strings.ToLower(u.Host)

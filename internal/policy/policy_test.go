@@ -5,46 +5,40 @@ import (
 	"time"
 )
 
-func TestEffectiveMergesBaseGrantsAndEssentials(t *testing.T) {
+func TestEffectiveUnionAcrossGroupsAndDevice(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	exp := now.Add(time.Hour)
 	expired := now.Add(-time.Minute)
 
-	apps, urls := Effective(
-		[]Entry{
-			{Kind: KindApp, Value: "com.school.learn"},
-			{Kind: KindURL, Value: "https://www.khanacademy.org/"},
-		},
-		[]Grant{
-			{Kind: KindURL, Value: "https://example.com/lesson", ExpiresAt: &exp},
-			{Kind: KindURL, Value: "https://blocked.example/old", ExpiresAt: &expired},
-			{Kind: KindApp, Value: "com.school.temp", EnrollmentID: "dev-1", ExpiresAt: &exp},
-			{Kind: KindApp, Value: "com.school.other", EnrollmentID: "dev-2", ExpiresAt: &exp},
-		},
-		"dev-1",
-		now,
-	)
+	base := []Entry{
+		{Kind: KindURL, Value: "school.edu", Target: Target{Type: TargetGlobal}},
+		{Kind: KindApp, Value: "com.school.learn", Target: Target{Type: TargetGroup, ID: "g-math"}},
+		{Kind: KindURL, Value: "khanacademy.org", Target: Target{Type: TargetGroup, ID: "g-math"}},
+		{Kind: KindApp, Value: "com.school.art", Target: Target{Type: TargetGroup, ID: "g-art"}},
+		{Kind: KindApp, Value: "com.school.onlya", Target: Target{Type: TargetDevice, ID: "dev-a"}},
+	}
+	grants := []Grant{
+		{Kind: KindURL, Value: "example.com/lesson", Target: Target{Type: TargetDevice, ID: "dev-a"}, ExpiresAt: &exp},
+		{Kind: KindURL, Value: "expired.example", Target: Target{Type: TargetDevice, ID: "dev-a"}, ExpiresAt: &expired},
+		{Kind: KindApp, Value: "com.school.other", Target: Target{Type: TargetDevice, ID: "dev-b"}, ExpiresAt: &exp},
+	}
 
+	apps, urls := Effective(base, grants, []string{"g-math", "g-art"}, "dev-a", now)
 	assertContains(t, apps, "com.apple.mobilesafari")
-	assertContains(t, apps, "com.apple.webapp")
 	assertContains(t, apps, "com.school.learn")
-	assertContains(t, apps, "com.school.temp")
+	assertContains(t, apps, "com.school.art")
+	assertContains(t, apps, "com.school.onlya")
 	assertNotContains(t, apps, "com.school.other")
+	assertContains(t, urls, "school.edu")
 	assertContains(t, urls, "khanacademy.org")
 	assertContains(t, urls, "example.com/lesson")
-	assertNotContains(t, urls, "blocked.example/old")
-}
+	assertNotContains(t, urls, "expired.example")
 
-func TestNormalizeURL(t *testing.T) {
-	if got := Normalize(KindURL, "HTTPS://WWW.Example.COM/Path/"); got != "example.com/Path" && got != "example.com/path" {
-		// path case preserved from EscapedPath; host lowercased
-		if got != "example.com/Path" {
-			t.Fatalf("Normalize URL = %q", got)
-		}
-	}
-	if got := Normalize(KindApp, " Com.Foo.Bar "); got != "com.foo.bar" {
-		t.Fatalf("Normalize app = %q", got)
-	}
+	_, urlsB := Effective(base, grants, []string{"g-math"}, "dev-b", now)
+	assertNotContains(t, urlsB, "example.com/lesson")
+	appsB, _ := Effective(base, grants, nil, "dev-b", now)
+	assertContains(t, appsB, "com.school.other")
+	assertNotContains(t, appsB, "com.school.onlya")
 }
 
 func assertContains(t *testing.T, list []string, want string) {

@@ -3,6 +3,7 @@ package approvals
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/mdm"
@@ -11,53 +12,90 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
-// Service handles access requests and allowlist decisions.
+// Service handles student requests and allowlist decisions.
 type Service struct {
-	Store    store.Store
-	Enqueue  mdm.CommandEnqueuer
+	Store     store.Store
+	Enqueue   mdm.CommandEnqueuer
 	PortalURL string
 }
 
 // CreateRequestInput is student-submitted.
 type CreateRequestInput struct {
-	Kind         policy.Kind
+	Type         store.RequestType // access | general | bug (optional if Kind is app/url)
+	Kind         policy.Kind       // app | url for access
 	Value        string
 	EnrollmentID string
 	Reason       string
 }
 
-// DecideInput is admin Approve/Deny.
+// DecideInput is admin Approve/Deny/Resolve.
 type DecideInput struct {
 	RequestID string
 	Approve   bool
-	Duration  string // "15m", "1h", "24h", "permanent", or empty => permanent
+	Duration  string // access only: "15m", "1h", "24h", "permanent"
+	Scope     string // access only: device | group | global (default device)
+	GroupID   string // required when Scope=group
 }
 
 // CreateRequest stores a pending request.
-func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (store.AccessRequest, error) {
-	if in.Kind != policy.KindApp && in.Kind != policy.KindURL {
-		return store.AccessRequest{}, fmt.Errorf("kind must be app or url")
+func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (store.Request, error) {
+	typ, target, value, err := normalizeCreate(in)
+	if err != nil {
+		return store.Request{}, err
 	}
-	if policy.Normalize(in.Kind, in.Value) == "" {
-		return store.AccessRequest{}, fmt.Errorf("value is required")
-	}
-	return s.Store.CreateRequest(ctx, store.AccessRequest{
-		Kind:         in.Kind,
-		Value:        in.Value,
-		EnrollmentID: in.EnrollmentID,
-		Reason:       in.Reason,
+	return s.Store.CreateRequest(ctx, store.Request{
+		Type:         typ,
+		TargetKind:   target,
+		Value:        value,
+		EnrollmentID: strings.TrimSpace(in.EnrollmentID),
+		Reason:       strings.TrimSpace(in.Reason),
 		Status:       store.StatusPending,
 	})
 }
 
-// Decide approves or denies a pending request and, on approve, updates policy + enqueues a profile.
-func (s *Service) Decide(ctx context.Context, in DecideInput) (store.AccessRequest, error) {
+func normalizeCreate(in CreateRequestInput) (store.RequestType, policy.Kind, string, error) {
+	typ := store.RequestType(strings.TrimSpace(string(in.Type)))
+	kind := policy.Kind(strings.TrimSpace(string(in.Kind)))
+
+	// Back-compat: kind=app|url implies access.
+	if typ == "" && (kind == policy.KindApp || kind == policy.KindURL) {
+		typ = store.TypeAccess
+	}
+	if typ == "" {
+		return "", "", "", fmt.Errorf("type is required (access, general, or bug)")
+	}
+
+	value := strings.TrimSpace(in.Value)
+	if value == "" {
+		return "", "", "", fmt.Errorf("value/subject is required")
+	}
+
+	switch typ {
+	case store.TypeAccess:
+		if kind != policy.KindApp && kind != policy.KindURL {
+			return "", "", "", fmt.Errorf("access requests need kind app or url")
+		}
+		value = policy.Normalize(kind, value)
+		if value == "" {
+			return "", "", "", fmt.Errorf("value is required")
+		}
+		return typ, kind, value, nil
+	case store.TypeGeneral, store.TypeBug:
+		return typ, "", value, nil
+	default:
+		return "", "", "", fmt.Errorf("type must be access, general, or bug")
+	}
+}
+
+// Decide approves/resolves or denies a pending request.
+// Access approvals update allowlists and enqueue a profile; general/bug do not.
+func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, error) {
 	req, err := s.Store.GetRequest(ctx, in.RequestID)
 	if err != nil {
-		return store.AccessRequest{}, err
+		return store.Request{}, err
 	}
 	if req.Status != store.StatusPending {
-		return store.AccessRequest{}, fmt.Errorf("request %s is already %s", req.ID, req.Status)
+		return store.Request{}, fmt.Errorf("request %s is already %s", req.ID, req.Status)
 	}
 
 	now := time.Now().UTC()
@@ -67,47 +105,161 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.AccessReque
 	if !in.Approve {
 		req.Status = store.StatusDenied
 		if err := s.Store.UpdateRequest(ctx, req); err != nil {
-			return store.AccessRequest{}, err
+			return store.Request{}, err
 		}
 		return req, nil
 	}
 
-	req.Status = store.StatusApproved
-	expires, permanent, err := parseDuration(in.Duration, now)
-	if err != nil {
-		return store.AccessRequest{}, err
-	}
-
-	if permanent {
-		if err := s.Store.UpsertAllowlist(ctx, policy.Entry{
-			Kind:  req.Kind,
-			Value: req.Value,
-			Scope: "global",
-		}); err != nil {
-			return store.AccessRequest{}, err
+	switch req.Type {
+	case store.TypeAccess:
+		req.Status = store.StatusApproved
+		expires, permanent, err := parseDuration(in.Duration, now)
+		if err != nil {
+			return store.Request{}, err
 		}
-	} else {
-		if err := s.Store.AddGrant(ctx, policy.Grant{
-			Kind:         req.Kind,
-			Value:        req.Value,
-			EnrollmentID: req.EnrollmentID,
-			ExpiresAt:    expires,
-		}); err != nil {
-			return store.AccessRequest{}, err
+		target, err := resolveApproveTarget(in, req)
+		if err != nil {
+			return store.Request{}, err
 		}
-	}
+		if permanent {
+			if err := s.Store.UpsertAllowlist(ctx, policy.Entry{
+				Kind:   req.TargetKind,
+				Value:  req.Value,
+				Target: target,
+			}); err != nil {
+				return store.Request{}, err
+			}
+		} else {
+			if err := s.Store.AddGrant(ctx, policy.Grant{
+				Kind:      req.TargetKind,
+				Value:     req.Value,
+				Target:    target,
+				ExpiresAt: expires,
+			}); err != nil {
+				return store.Request{}, err
+			}
+		}
+		if err := s.Store.UpdateRequest(ctx, req); err != nil {
+			return store.Request{}, err
+		}
+		devices, err := s.devicesAffectedBy(ctx, target, req.EnrollmentID)
+		if err != nil {
+			return store.Request{}, err
+		}
+		for _, enrollmentID := range devices {
+			if err := s.pushAllowlistProfile(ctx, enrollmentID); err != nil {
+				return store.Request{}, fmt.Errorf("approved but enqueue failed for %s: %w", enrollmentID, err)
+			}
+		}
+		return req, nil
 
-	if err := s.Store.UpdateRequest(ctx, req); err != nil {
-		return store.AccessRequest{}, err
-	}
+	case store.TypeBug:
+		req.Status = store.StatusResolved
+		if err := s.Store.UpdateRequest(ctx, req); err != nil {
+			return store.Request{}, err
+		}
+		return req, nil
 
-	if err := s.pushAllowlistProfile(ctx, req.EnrollmentID); err != nil {
-		return store.AccessRequest{}, fmt.Errorf("approved but enqueue failed: %w", err)
+	case store.TypeGeneral:
+		req.Status = store.StatusApproved
+		if err := s.Store.UpdateRequest(ctx, req); err != nil {
+			return store.Request{}, err
+		}
+		return req, nil
+
+	default:
+		return store.Request{}, fmt.Errorf("unknown request type %q", req.Type)
 	}
-	return req, nil
 }
 
-// EffectiveAllowlist returns merged apps and URLs.
+func resolveApproveTarget(in DecideInput, req store.Request) (policy.Target, error) {
+	scope := strings.ToLower(strings.TrimSpace(in.Scope))
+	if scope == "" {
+		scope = "device"
+	}
+	switch scope {
+	case "global":
+		return policy.Target{Type: policy.TargetGlobal}, nil
+	case "group":
+		gid := strings.TrimSpace(in.GroupID)
+		if gid == "" {
+			return policy.Target{}, fmt.Errorf("group_id is required when scope=group")
+		}
+		return policy.Target{Type: policy.TargetGroup, ID: gid}, nil
+	case "device":
+		id := strings.TrimSpace(req.EnrollmentID)
+		if id == "" {
+			return policy.Target{}, fmt.Errorf("request has no enrollment_id for device scope")
+		}
+		return policy.Target{Type: policy.TargetDevice, ID: id}, nil
+	default:
+		return policy.Target{}, fmt.Errorf("scope must be device, group, or global")
+	}
+}
+
+func (s *Service) devicesAffectedBy(ctx context.Context, target policy.Target, requestDevice string) ([]string, error) {
+	switch target.Type {
+	case policy.TargetDevice:
+		id := target.ID
+		if id == "" {
+			id = requestDevice
+		}
+		if id == "" {
+			return []string{"unassigned"}, nil
+		}
+		return []string{id}, nil
+	case policy.TargetGroup:
+		members, err := s.Store.ListEnrollmentIDsForGroup(ctx, target.ID)
+		if err != nil {
+			return nil, err
+		}
+		if requestDevice != "" {
+			found := false
+			for _, m := range members {
+				if m == requestDevice {
+					found = true
+					break
+				}
+			}
+			if !found {
+				members = append(members, requestDevice)
+			}
+		}
+		if len(members) == 0 {
+			if requestDevice != "" {
+				return []string{requestDevice}, nil
+			}
+			return []string{"unassigned"}, nil
+		}
+		return members, nil
+	case policy.TargetGlobal:
+		ids, err := s.Store.ListAllEnrollmentIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		set := map[string]struct{}{}
+		for _, id := range ids {
+			if id != "" {
+				set[id] = struct{}{}
+			}
+		}
+		if requestDevice != "" {
+			set[requestDevice] = struct{}{}
+		}
+		out := make([]string, 0, len(set))
+		for id := range set {
+			out = append(out, id)
+		}
+		if len(out) == 0 {
+			return []string{"unassigned"}, nil
+		}
+		return out, nil
+	default:
+		return []string{requestDevice}, nil
+	}
+}
+
+// EffectiveAllowlist returns merged apps and URLs for a device.
 func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (apps, urls []string, err error) {
 	base, err := s.Store.ListAllowlist(ctx)
 	if err != nil {
@@ -117,7 +269,11 @@ func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (
 	if err != nil {
 		return nil, nil, err
 	}
-	apps, urls = policy.Effective(base, grants, enrollmentID, time.Now().UTC())
+	groups, err := s.Store.ListGroupsForDevice(ctx, enrollmentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	apps, urls = policy.Effective(base, grants, groups, enrollmentID, time.Now().UTC())
 	return apps, urls, nil
 }
 
@@ -139,9 +295,9 @@ func (s *Service) pushAllowlistProfile(ctx context.Context, enrollmentID string)
 	return s.Enqueue.InstallProfile(ctx, enrollmentID, profile)
 }
 
-// EnsureWebClip enqueues the Request Access Web Clip profile (stub-friendly).
+// EnsureWebClip enqueues the Request Access Web Clip for a device-scoped portal URL.
 func (s *Service) EnsureWebClip(ctx context.Context, enrollmentID string) error {
-	raw, err := profiles.BuildRequestWebClipProfile(s.PortalURL)
+	raw, err := profiles.BuildRequestWebClipProfile(profiles.DevicePortalURL(s.PortalURL, enrollmentID))
 	if err != nil {
 		return err
 	}
@@ -165,7 +321,6 @@ func parseDuration(d string, now time.Time) (expires *time.Time, permanent bool,
 		case "24h":
 			dur = 24 * time.Hour
 		case "today":
-			// end of UTC day
 			y, m, day := now.Date()
 			end := time.Date(y, m, day, 23, 59, 59, 0, time.UTC)
 			return &end, false, nil

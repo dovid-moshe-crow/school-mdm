@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
@@ -18,23 +19,37 @@ import (
 
 // API serves product HTTP endpoints.
 type API struct {
-	Cfg      config.Config
-	Service  *approvals.Service
-	Store    store.Store
-	Stub     *mdm.StubEnqueuer
-	Log      *slog.Logger
+	Cfg     config.Config
+	Service *approvals.Service
+	Catalog *appmeta.Catalog
+	Store   store.Store
+	Stub    *mdm.StubEnqueuer
+	Log     *slog.Logger
 }
 
 // Mount registers routes on mux.
 func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
 	mux.HandleFunc("GET /api/allowlist", a.handleAllowlist)
+	mux.HandleFunc("GET /api/allowances", a.requireAdmin(a.handleListAllowances))
+	mux.HandleFunc("POST /api/allowances", a.requireAdmin(a.handleCreateAllowance))
+	mux.HandleFunc("GET /api/devices", a.requireAdmin(a.handleListDevices))
+	mux.HandleFunc("GET /api/groups", a.requireAdmin(a.handleListGroups))
+	mux.HandleFunc("POST /api/groups", a.requireAdmin(a.handleCreateGroup))
+	mux.HandleFunc("GET /api/groups/{id}", a.requireAdmin(a.handleGetGroup))
+	mux.HandleFunc("PATCH /api/groups/{id}", a.requireAdmin(a.handleUpdateGroup))
+	mux.HandleFunc("DELETE /api/groups/{id}", a.requireAdmin(a.handleDeleteGroup))
+	mux.HandleFunc("GET /api/groups/{id}/members", a.requireAdmin(a.handleListGroupMembers))
+	mux.HandleFunc("PUT /api/groups/{id}/members", a.requireAdmin(a.handleSetGroupMembers))
+	mux.HandleFunc("GET /api/apps/search", a.handleAppSearch)
+	mux.HandleFunc("GET /api/apps/{bundleID}", a.handleAppLookup)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
 	mux.HandleFunc("GET /api/requests", a.requireAdmin(a.handleListRequests))
 	mux.HandleFunc("POST /api/requests/{id}/approve", a.requireAdmin(a.handleApprove))
 	mux.HandleFunc("POST /api/requests/{id}/deny", a.requireAdmin(a.handleDeny))
 	mux.HandleFunc("GET /api/stub-commands", a.requireAdmin(a.handleStubCommands))
-	mux.HandleFunc("GET /", a.handlePortal)
+	mux.HandleFunc("GET /", a.handleHome)
+	mux.HandleFunc("GET /d/{deviceID}", a.handleDevicePortal)
 	mux.HandleFunc("GET /admin", a.handleAdminPage)
 }
 
@@ -60,7 +75,39 @@ func (a *API) handleAllowlist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"apps": apps, "urls": urls})
 }
 
+func (a *API) handleAppSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if a.Catalog == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app catalog unavailable"})
+		return
+	}
+	list, err := a.Catalog.Search(r.Context(), q, 12)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []store.AppMeta{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (a *API) handleAppLookup(w http.ResponseWriter, r *http.Request) {
+	bundleID := r.PathValue("bundleID")
+	if a.Catalog == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app catalog unavailable"})
+		return
+	}
+	meta, err := a.Catalog.LookupBundle(r.Context(), bundleID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, meta)
+}
+
 type createRequestBody struct {
+	Type         string `json:"type"`
 	Kind         string `json:"kind"`
 	Value        string `json:"value"`
 	EnrollmentID string `json:"enrollment_id"`
@@ -73,7 +120,11 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	if body.EnrollmentID == "" {
+		body.EnrollmentID = r.Header.Get("X-Device-ID")
+	}
 	req, err := a.Service.CreateRequest(r.Context(), approvals.CreateRequestInput{
+		Type:         store.RequestType(body.Type),
 		Kind:         policy.Kind(body.Kind),
 		Value:        body.Value,
 		EnrollmentID: body.EnrollmentID,
@@ -83,25 +134,16 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp && a.Catalog != nil {
+		_, _ = a.Catalog.LookupBundle(r.Context(), req.Value)
+	}
 	writeJSON(w, http.StatusCreated, req)
-}
-
-func (a *API) handleListRequests(w http.ResponseWriter, r *http.Request) {
-	var statusFilter *store.RequestStatus
-	if s := r.URL.Query().Get("status"); s != "" {
-		st := store.RequestStatus(s)
-		statusFilter = &st
-	}
-	list, err := a.Store.ListRequests(r.Context(), statusFilter)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
 }
 
 type decideBody struct {
 	Duration string `json:"duration"`
+	Scope    string `json:"scope"`
+	GroupID  string `json:"group_id"`
 }
 
 func (a *API) handleApprove(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +154,8 @@ func (a *API) handleApprove(w http.ResponseWriter, r *http.Request) {
 		RequestID: id,
 		Approve:   true,
 		Duration:  body.Duration,
+		Scope:     body.Scope,
+		GroupID:   body.GroupID,
 	})
 	if err != nil {
 		writeDecideErr(w, err)
@@ -140,10 +184,10 @@ func (a *API) handleStubCommands(w http.ResponseWriter, r *http.Request) {
 	}
 	cmds := a.Stub.Snapshot()
 	type view struct {
-		EnrollmentID string    `json:"enrollment_id"`
-		At           time.Time `json:"at"`
-		ProfileBytes int       `json:"profile_bytes"`
-		ProfilePreview string  `json:"profile_preview"`
+		EnrollmentID   string    `json:"enrollment_id"`
+		At             time.Time `json:"at"`
+		ProfileBytes   int       `json:"profile_bytes"`
+		ProfilePreview string    `json:"profile_preview"`
 	}
 	out := make([]view, 0, len(cmds))
 	for _, c := range cmds {
@@ -177,10 +221,17 @@ func (a *API) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (a *API) handlePortal(w http.ResponseWriter, r *http.Request) {
-	urlPrefill := r.URL.Query().Get("url")
+func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = portalTmpl.Execute(w, map[string]string{"URL": urlPrefill})
+	_ = homeTmpl.Execute(w, nil)
+}
+
+func (a *API) handleDevicePortal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = portalTmpl.Execute(w, map[string]any{
+		"DeviceID": r.PathValue("deviceID"),
+		"URL":      r.URL.Query().Get("url"),
+	})
 }
 
 func (a *API) handleAdminPage(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +240,9 @@ func (a *API) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	if token == "" && len(a.Cfg.AdminTokens) > 0 {
 		token = a.Cfg.AdminTokens[0]
 	}
-	_ = adminTmpl.Execute(w, map[string]string{"Token": token})
+	if err := adminTmpl.Execute(w, map[string]string{"Token": token}); err != nil {
+		a.Log.Error("admin template", "err", err)
+	}
 }
 
 func writeDecideErr(w http.ResponseWriter, err error) {
@@ -210,107 +263,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-var portalTmpl = template.Must(template.New("portal").Parse(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Request Access</title>
-  <style>
-    body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.4}
-    label{display:block;margin:.75rem 0 .25rem;font-weight:600}
-    input,select,textarea,button{width:100%;padding:.6rem;font:inherit;box-sizing:border-box}
-    button{margin-top:1rem;background:#111;color:#fff;border:0;cursor:pointer}
-    #msg{margin-top:1rem}
-  </style>
-</head>
-<body>
-  <h1>Request Access</h1>
-  <p>Ask to open an app or website. An admin can approve with one tap.</p>
-  <form id="f">
-    <label for="kind">Type</label>
-    <select id="kind" name="kind">
-      <option value="url">Website</option>
-      <option value="app">App</option>
-    </select>
-    <label for="value">App bundle ID or URL</label>
-    <input id="value" name="value" required value="{{.URL}}"/>
-    <label for="enrollment_id">Device ID (optional)</label>
-    <input id="enrollment_id" name="enrollment_id" placeholder="enrollment id"/>
-    <label for="reason">Reason</label>
-    <textarea id="reason" name="reason" rows="3"></textarea>
-    <button type="submit">Submit request</button>
-  </form>
-  <div id="msg"></div>
-  <script>
-    document.getElementById('f').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = {
-        kind: document.getElementById('kind').value,
-        value: document.getElementById('value').value,
-        enrollment_id: document.getElementById('enrollment_id').value,
-        reason: document.getElementById('reason').value,
-      };
-      const res = await fetch('/api/requests', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-      const data = await res.json();
-      document.getElementById('msg').textContent = res.ok
-        ? ('Submitted. Status: ' + data.status + ' (id ' + data.id + ')')
-        : (data.error || 'failed');
-    });
-  </script>
-</body>
-</html>`))
+func toJSON(v any) template.JS {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return template.JS("null")
+	}
+	return template.JS(b)
+}
 
-var adminTmpl = template.Must(template.New("admin").Parse(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Admin — Access Requests</title>
-  <style>
-    body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem}
-    .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:.75rem 0}
-    button{margin-right:.5rem;padding:.45rem .8rem;font:inherit;cursor:pointer}
-    .approve{background:#0a7;color:#fff;border:0}
-    .deny{background:#b33;color:#fff;border:0}
-    code{font-size:.85em}
-  </style>
-</head>
-<body>
-  <h1>Access requests</h1>
-  <p>Token used: <code id="token">{{.Token}}</code></p>
-  <div id="list">Loading…</div>
-  <script>
-    const token = document.getElementById('token').textContent.trim();
-    async function load() {
-      const res = await fetch('/api/requests?status=pending', {headers:{Authorization:'Bearer '+token}});
-      const data = await res.json();
-      const el = document.getElementById('list');
-      if (!res.ok) { el.textContent = data.error || 'failed'; return; }
-      if (!data || data.length === 0) { el.textContent = 'No pending requests.'; return; }
-      el.innerHTML = data.map(r =>
-        '<div class="card" data-id="'+r.id+'">' +
-          '<div><strong>'+r.kind+'</strong>: '+r.value+'</div>' +
-          '<div>Device: '+(r.enrollment_id || '—')+' · '+(r.reason || '')+'</div>' +
-          '<div>' +
-            '<button class="approve" onclick="decide(\''+r.id+'\', true)">Approve 1h</button>' +
-            '<button class="approve" onclick="decide(\''+r.id+'\', true, \'permanent\')">Approve permanent</button>' +
-            '<button class="deny" onclick="decide(\''+r.id+'\', false)">Deny</button>' +
-          '</div>' +
-        '</div>').join('');
-    }
-    async function decide(id, approve, duration='1h') {
-      const path = approve ? 'approve' : 'deny';
-      const res = await fetch('/api/requests/'+id+'/'+path, {
-        method:'POST',
-        headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-        body: JSON.stringify({duration})
-      });
-      const data = await res.json();
-      if (!res.ok) alert(data.error || 'failed');
-      load();
-    }
-    load();
-  </script>
-</body>
-</html>`))
+func mustTemplate(name, body string) *template.Template {
+	return template.Must(template.New(name).Funcs(template.FuncMap{
+		"json": toJSON,
+	}).Parse(body))
+}
