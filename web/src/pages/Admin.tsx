@@ -579,9 +579,37 @@ export default function Admin() {
             <div className="card" key={`${row.kind}-${row.value}-${row.source}-${i}`}>
               <span className="badge">{row.kind === 'app' ? 'אפליקציה' : 'אתר'}</span>
               <span className="badge">{sourceLabel(row.source)}</span>
-              <div style={{ marginTop: '0.55rem' }}>
-                <strong>{row.app?.app_name || row.value}</strong>
-                <div className="meta"><code>{row.value}</code></div>
+              <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                {row.kind === 'app' && row.app?.artwork_url ? (
+                  <img
+                    src={row.app.artwork_url}
+                    alt=""
+                    width={44}
+                    height={44}
+                    style={{ borderRadius: 10, objectFit: 'cover', background: '#eee', flexShrink: 0 }}
+                  />
+                ) : row.kind === 'app' ? (
+                  <div
+                    aria-hidden
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: 10,
+                      background: '#e8eef2',
+                      display: 'grid',
+                      placeItems: 'center',
+                      fontWeight: 700,
+                      color: 'var(--muted)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {(row.app?.app_name || row.value || '?').slice(0, 1).toUpperCase()}
+                  </div>
+                ) : null}
+                <div>
+                  <strong>{row.app?.app_name || row.value}</strong>
+                  <div className="meta"><code>{row.value}</code></div>
+                </div>
               </div>
               {row.enrollment_id && <div className="meta">{he.device}: {labelDevice(row.enrollment_id, devices)}</div>}
               {row.group_id && <div className="meta">{he.group}: {groups.find((g) => g.id === row.group_id)?.name || row.group_id}</div>}
