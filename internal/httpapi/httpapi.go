@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/mdm"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
+	"github.com/dwdmsh/school-mdm/internal/webui"
 )
 
 // API serves product HTTP endpoints.
@@ -43,14 +43,14 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/groups/{id}/members", a.requireAdmin(a.handleSetGroupMembers))
 	mux.HandleFunc("GET /api/apps/search", a.handleAppSearch)
 	mux.HandleFunc("GET /api/apps/{bundleID}", a.handleAppLookup)
+	mux.HandleFunc("GET /api/access-status", a.handleAccessStatus)
+	mux.HandleFunc("GET /api/device/{deviceID}/requests", a.handleDeviceRequests)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
 	mux.HandleFunc("GET /api/requests", a.requireAdmin(a.handleListRequests))
 	mux.HandleFunc("POST /api/requests/{id}/approve", a.requireAdmin(a.handleApprove))
 	mux.HandleFunc("POST /api/requests/{id}/deny", a.requireAdmin(a.handleDeny))
 	mux.HandleFunc("GET /api/stub-commands", a.requireAdmin(a.handleStubCommands))
-	mux.HandleFunc("GET /", a.handleHome)
-	mux.HandleFunc("GET /d/{deviceID}", a.handleDevicePortal)
-	mux.HandleFunc("GET /admin", a.handleAdminPage)
+	mux.Handle("/", webui.Handler())
 }
 
 func (a *API) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,8 @@ func (a *API) handleAppSearch(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.AppMeta{}
 	}
-	writeJSON(w, http.StatusOK, list)
+	enrollment := strings.TrimSpace(r.URL.Query().Get("enrollment_id"))
+	writeJSON(w, http.StatusOK, a.annotateApps(r, list, enrollment))
 }
 
 func (a *API) handleAppLookup(w http.ResponseWriter, r *http.Request) {
@@ -221,30 +222,6 @@ func (a *API) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (a *API) handleHome(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = homeTmpl.Execute(w, nil)
-}
-
-func (a *API) handleDevicePortal(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = portalTmpl.Execute(w, map[string]any{
-		"DeviceID": r.PathValue("deviceID"),
-		"URL":      r.URL.Query().Get("url"),
-	})
-}
-
-func (a *API) handleAdminPage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	token := r.URL.Query().Get("token")
-	if token == "" && len(a.Cfg.AdminTokens) > 0 {
-		token = a.Cfg.AdminTokens[0]
-	}
-	if err := adminTmpl.Execute(w, map[string]string{"Token": token}); err != nil {
-		a.Log.Error("admin template", "err", err)
-	}
-}
-
 func writeDecideErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -261,18 +238,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func toJSON(v any) template.JS {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return template.JS("null")
-	}
-	return template.JS(b)
-}
-
-func mustTemplate(name, body string) *template.Template {
-	return template.Must(template.New(name).Funcs(template.FuncMap{
-		"json": toJSON,
-	}).Parse(body))
 }
