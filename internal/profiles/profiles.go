@@ -2,6 +2,7 @@ package profiles
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -77,7 +78,22 @@ func BuildAllowlistProfile(displayName string, apps, urls []string) ([]byte, err
 	return out, nil
 }
 
+// DevicePortalURL builds the per-device portal path /d/{enrollmentID}.
+func DevicePortalURL(portalBase, enrollmentID string) string {
+	base := strings.TrimRight(portalBase, "/")
+	id := strings.TrimSpace(enrollmentID)
+	if id == "" {
+		return base + "/"
+	}
+	return base + "/d/" + urlPathEscape(id)
+}
+
+func urlPathEscape(s string) string {
+	return strings.ReplaceAll(url.PathEscape(s), "+", "%20")
+}
+
 // BuildRequestWebClipProfile installs a Home Screen Web Clip to the portal.
+// portalURL should already include the device path when known (see DevicePortalURL).
 func BuildRequestWebClipProfile(portalURL string) ([]byte, error) {
 	if portalURL == "" {
 		return nil, fmt.Errorf("portalURL is required")

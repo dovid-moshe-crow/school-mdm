@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
 	"github.com/dwdmsh/school-mdm/internal/httpapi"
@@ -24,6 +25,7 @@ type App struct {
 	Store   store.Store
 	Stub    *mdm.StubEnqueuer
 	Service *approvals.Service
+	Catalog *appmeta.Catalog
 	closer  func()
 }
 
@@ -59,6 +61,7 @@ func New(ctx context.Context) (*App, error) {
 		Enqueue:   stub,
 		PortalURL: cfg.PortalBaseURL,
 	}
+	catalog := &appmeta.Catalog{Store: st}
 
 	return &App{
 		Cfg:     cfg,
@@ -66,6 +69,7 @@ func New(ctx context.Context) (*App, error) {
 		Store:   st,
 		Stub:    stub,
 		Service: svc,
+		Catalog: catalog,
 		closer:  closer,
 	}, nil
 }
@@ -83,6 +87,7 @@ func (a *App) Handler() http.Handler {
 	api := &httpapi.API{
 		Cfg:     a.Cfg,
 		Service: a.Service,
+		Catalog: a.Catalog,
 		Store:   a.Store,
 		Stub:    a.Stub,
 		Log:     a.Log,

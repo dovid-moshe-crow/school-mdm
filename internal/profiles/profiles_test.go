@@ -26,7 +26,11 @@ func TestBuildAllowlistProfile(t *testing.T) {
 }
 
 func TestBuildRequestWebClipProfile(t *testing.T) {
-	raw, err := BuildRequestWebClipProfile("https://mdm.example/portal")
+	portal := DevicePortalURL("https://mdm.example", "ipad-42")
+	if portal != "https://mdm.example/d/ipad-42" {
+		t.Fatalf("portal=%s", portal)
+	}
+	raw, err := BuildRequestWebClipProfile(portal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +38,7 @@ func TestBuildRequestWebClipProfile(t *testing.T) {
 	if !strings.Contains(s, "com.apple.webClip.managed") {
 		t.Fatalf("missing webclip type: %s", s)
 	}
-	if !strings.Contains(s, "https://mdm.example/portal") {
+	if !strings.Contains(s, "https://mdm.example/d/ipad-42") {
 		t.Fatalf("missing portal url: %s", s)
 	}
 }

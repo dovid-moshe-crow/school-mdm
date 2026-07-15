@@ -13,40 +13,61 @@ Nano protocol libraries will be wired for real device enrollments later. This ph
 
 ```bash
 cp .env.example .env
-export PATH="$HOME/.local/go/bin:$PATH"
+export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
 make tidy
 make test
 make run
 ```
 
-With no `DATABASE_URL`, the server uses an in-memory store.
+### Live reload (recommended in your terminal)
 
-### Neon (reclaimable DB)
+Watches the repo and rebuilds/restarts the server when code changes:
 
 ```bash
-npm install -g neonctl   # if needed
-export NEON_API_KEY=...  # from Neon console
-# optional: export NEON_PROJECT_ID=...
-make neon                # creates branch school-mdm-dev and prints DATABASE_URL
-# paste into .env, then make run (uses postgres store + auto-migrations)
+export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
+cd ~/Projects/school-mdm
+make dev
 ```
 
-Without credentials the server uses the in-memory store.
+Then open http://localhost:8080/admin and http://localhost:8080/d/demo-ipad.  
+Leave that terminal open. `Ctrl+C` stops it.
+
+(`make dev` installs [Air](https://github.com/air-verse/air) on first run if needed.)
+
+With no `DATABASE_URL`, the server uses an in-memory store.
+
+### Neon (claimable DB — recommended)
+
+Creates a temporary hosted Postgres with **no Neon login** (expires in ~72h unless you claim it):
+
+```bash
+make neon          # writes DATABASE_URL into .env
+make run           # or: make dev
+```
+
+Then open http://localhost:8080/healthz — you should see `"store":"postgres"`.
+
+Claim the DB to your Neon account (optional, keeps it permanently) using `PUBLIC_POSTGRES_CLAIM_URL` in `.env`.
 ## HTTP
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/healthz` | liveness + store kind |
-| GET | `/` | student portal (HTML) |
-| GET | `/admin` | admin queue (HTML) |
-| POST | `/api/requests` | create access request (JSON) |
-| GET | `/api/requests` | list requests (admin Bearer) |
-| POST | `/api/requests/{id}/approve` | approve (admin Bearer) |
-| POST | `/api/requests/{id}/deny` | deny (admin Bearer) |
+| GET | `/` | explains device-scoped portal |
+| GET | `/d/{deviceID}` | student portal (device id in URL; `?url=` optional) |
+| GET | `/admin` | admin queue |
+| GET | `/api/apps/search?q=` | App Store search (cache + iTunes fallback) |
+| GET | `/api/apps/{bundleID}` | lookup/cached metadata |
+| POST | `/api/requests` | create request (`enrollment_id` usually from `/d/...`) |
+| GET | `/api/requests` | list/filter requests (`status`, `type`, `enrollment_id`, `q`, `sort`) |
+| GET | `/api/allowances` | allowlists (`scope=global\|device\|all`, `kind`, `enrollment_id`, `q`) |
+| GET | `/api/devices` | known device IDs (admin) |
+| POST | `/api/requests/{id}/approve` | approve/resolve (admin) |
+| POST | `/api/requests/{id}/deny` | deny (admin) |
 | GET | `/api/allowlist` | effective allowlist |
 | GET | `/api/stub-commands` | profiles the stub would have pushed |
 
-Admin auth: `Authorization: Bearer <token>` matching `ADMIN_TOKENS`.
+Access approvals update allowlists and stub-enqueue a profile. General/bug tickets only change status.
+App metadata is cached in `app_metadata` and refreshed from the iTunes Search/Lookup API.
 
 ## Layout
 
