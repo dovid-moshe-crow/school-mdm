@@ -28,6 +28,11 @@ export type Group = {
   created_at: string
 }
 
+export type Device = {
+  enrollment_id: string
+  name: string
+}
+
 export type Allowance = {
   kind: string
   value: string
@@ -38,10 +43,6 @@ export type Allowance = {
   group_id?: string
   expires_at?: string
   app?: AppMeta
-}
-
-function authHeaders(token: string): HeadersInit {
-  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -58,9 +59,7 @@ export const api = {
   },
   accessStatus(enrollmentID: string, kind: string, value: string) {
     const p = new URLSearchParams({ enrollment_id: enrollmentID, kind, value })
-    return fetch(`/api/access-status?${p}`).then((r) =>
-      json<{ status: AccessStatus }>(r),
-    )
+    return fetch(`/api/access-status?${p}`).then((r) => json<{ status: AccessStatus }>(r))
   },
   createRequest(body: Record<string, string>) {
     return fetch('/api/requests', {
@@ -74,58 +73,73 @@ export const api = {
       json<Request[]>(r),
     )
   },
-  requests(token: string, params: URLSearchParams) {
-    return fetch(`/api/requests?${params}`, { headers: authHeaders(token) }).then((r) =>
-      json<Request[]>(r),
-    )
+  requests(params: URLSearchParams) {
+    return fetch(`/api/requests?${params}`).then((r) => json<Request[]>(r))
   },
-  decide(token: string, id: string, approve: boolean, body: Record<string, string>) {
+  decide(id: string, approve: boolean, body: Record<string, string>) {
     return fetch(`/api/requests/${id}/${approve ? 'approve' : 'deny'}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<Request>(r))
   },
-  devices(token: string) {
-    return fetch('/api/devices', { headers: authHeaders(token) }).then((r) => json<string[]>(r))
+  devices() {
+    return fetch('/api/devices').then((r) => json<Device[]>(r))
   },
-  groups(token: string) {
-    return fetch('/api/groups', { headers: authHeaders(token) }).then((r) => json<Group[]>(r))
+  setDeviceName(id: string, name: string) {
+    return fetch(`/api/devices/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }).then((r) => json<Device>(r))
   },
-  createGroup(token: string, name: string, description: string) {
+  groups() {
+    return fetch('/api/groups').then((r) => json<Group[]>(r))
+  },
+  createGroup(name: string, description: string) {
     return fetch('/api/groups', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, description }),
     }).then((r) => json<Group>(r))
   },
-  deleteGroup(token: string, id: string) {
-    return fetch(`/api/groups/${id}`, { method: 'DELETE', headers: authHeaders(token) }).then((r) =>
-      json<{ ok: string }>(r),
-    )
+  updateGroup(id: string, name: string, description: string) {
+    return fetch(`/api/groups/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    }).then((r) => json<Group>(r))
   },
-  members(token: string, id: string) {
-    return fetch(`/api/groups/${id}/members`, { headers: authHeaders(token) }).then((r) =>
-      json<string[]>(r),
-    )
+  deleteGroup(id: string) {
+    return fetch(`/api/groups/${id}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
   },
-  setMembers(token: string, id: string, enrollment_ids: string[]) {
+  members(id: string) {
+    return fetch(`/api/groups/${id}/members`).then((r) => json<string[]>(r))
+  },
+  setMembers(id: string, enrollment_ids: string[]) {
     return fetch(`/api/groups/${id}/members`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_ids }),
     }).then((r) => json<string[]>(r))
   },
-  allowances(token: string, params: URLSearchParams) {
-    return fetch(`/api/allowances?${params}`, { headers: authHeaders(token) }).then((r) =>
-      json<Allowance[]>(r),
-    )
+  allowances(params: URLSearchParams) {
+    return fetch(`/api/allowances?${params}`).then((r) => json<Allowance[]>(r))
   },
-  createAllowance(token: string, body: Record<string, string>) {
+  createAllowance(body: Record<string, string>) {
     return fetch('/api/allowances', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<unknown>(r))
+  },
+  deleteAllowance(row: Allowance) {
+    const p = new URLSearchParams({
+      kind: row.kind,
+      value: row.value,
+      target_type: row.target_type || 'global',
+      target_id: row.target_id || '',
+    })
+    return fetch(`/api/allowances?${p}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
   },
 }

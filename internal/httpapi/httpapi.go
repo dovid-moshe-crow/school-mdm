@@ -31,25 +31,27 @@ type API struct {
 func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
 	mux.HandleFunc("GET /api/allowlist", a.handleAllowlist)
-	mux.HandleFunc("GET /api/allowances", a.requireAdmin(a.handleListAllowances))
-	mux.HandleFunc("POST /api/allowances", a.requireAdmin(a.handleCreateAllowance))
-	mux.HandleFunc("GET /api/devices", a.requireAdmin(a.handleListDevices))
-	mux.HandleFunc("GET /api/groups", a.requireAdmin(a.handleListGroups))
-	mux.HandleFunc("POST /api/groups", a.requireAdmin(a.handleCreateGroup))
-	mux.HandleFunc("GET /api/groups/{id}", a.requireAdmin(a.handleGetGroup))
-	mux.HandleFunc("PATCH /api/groups/{id}", a.requireAdmin(a.handleUpdateGroup))
-	mux.HandleFunc("DELETE /api/groups/{id}", a.requireAdmin(a.handleDeleteGroup))
-	mux.HandleFunc("GET /api/groups/{id}/members", a.requireAdmin(a.handleListGroupMembers))
-	mux.HandleFunc("PUT /api/groups/{id}/members", a.requireAdmin(a.handleSetGroupMembers))
+	mux.HandleFunc("GET /api/allowances", a.handleListAllowances)
+	mux.HandleFunc("POST /api/allowances", a.handleCreateAllowance)
+	mux.HandleFunc("DELETE /api/allowances", a.handleDeleteAllowance)
+	mux.HandleFunc("GET /api/devices", a.handleListDevices)
+	mux.HandleFunc("PATCH /api/devices/{id}", a.handleUpdateDevice)
+	mux.HandleFunc("GET /api/groups", a.handleListGroups)
+	mux.HandleFunc("POST /api/groups", a.handleCreateGroup)
+	mux.HandleFunc("GET /api/groups/{id}", a.handleGetGroup)
+	mux.HandleFunc("PATCH /api/groups/{id}", a.handleUpdateGroup)
+	mux.HandleFunc("DELETE /api/groups/{id}", a.handleDeleteGroup)
+	mux.HandleFunc("GET /api/groups/{id}/members", a.handleListGroupMembers)
+	mux.HandleFunc("PUT /api/groups/{id}/members", a.handleSetGroupMembers)
 	mux.HandleFunc("GET /api/apps/search", a.handleAppSearch)
 	mux.HandleFunc("GET /api/apps/{bundleID}", a.handleAppLookup)
 	mux.HandleFunc("GET /api/access-status", a.handleAccessStatus)
 	mux.HandleFunc("GET /api/device/{deviceID}/requests", a.handleDeviceRequests)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
-	mux.HandleFunc("GET /api/requests", a.requireAdmin(a.handleListRequests))
-	mux.HandleFunc("POST /api/requests/{id}/approve", a.requireAdmin(a.handleApprove))
-	mux.HandleFunc("POST /api/requests/{id}/deny", a.requireAdmin(a.handleDeny))
-	mux.HandleFunc("GET /api/stub-commands", a.requireAdmin(a.handleStubCommands))
+	mux.HandleFunc("GET /api/requests", a.handleListRequests)
+	mux.HandleFunc("POST /api/requests/{id}/approve", a.handleApprove)
+	mux.HandleFunc("POST /api/requests/{id}/deny", a.handleDeny)
+	mux.HandleFunc("GET /api/stub-commands", a.handleStubCommands)
 	mux.Handle("/", webui.Handler())
 }
 
@@ -204,22 +206,6 @@ func (a *API) handleStubCommands(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-func (a *API) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(auth, "Bearer ")
-		token = strings.TrimSpace(token)
-		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
-		if !a.Cfg.ValidAdminToken(token) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next(w, r)
-	}
 }
 
 func writeDecideErr(w http.ResponseWriter, err error) {

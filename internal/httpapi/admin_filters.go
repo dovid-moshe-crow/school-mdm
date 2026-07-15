@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
@@ -254,16 +255,31 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	out, err := a.Store.ListAllEnrollmentIDs(r.Context())
+	out, err := a.Store.ListDevices(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	if out == nil {
-		out = []string{}
+		out = []store.Device{}
 	}
-	sort.Strings(out)
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := a.Store.SetDeviceName(r.Context(), id, body.Name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, store.Device{EnrollmentID: id, Name: strings.TrimSpace(body.Name)})
 }
 
 func (a *API) lookupAppMeta(r *http.Request, bundleID string) *store.AppMeta {

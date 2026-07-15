@@ -22,6 +22,7 @@ type Store struct {
 	apps      map[string]store.AppMeta
 	groups    map[string]store.Group
 	members   map[string]map[string]struct{} // groupID -> enrollmentID set
+	devices   map[string]string              // enrollmentID -> name
 }
 
 // New creates an empty memory store seeded with essentials as durable entries.
@@ -33,6 +34,7 @@ func New() *Store {
 		apps:      map[string]store.AppMeta{},
 		groups:    map[string]store.Group{},
 		members:   map[string]map[string]struct{}{},
+		devices:   map[string]string{},
 	}
 	for _, app := range policy.Essentials {
 		id := uuid.NewString()
@@ -72,6 +74,15 @@ func (s *Store) UpsertAllowlist(_ context.Context, entry policy.Entry) error {
 	return nil
 }
 
+func (s *Store) DeleteAllowlist(_ context.Context, kind policy.Kind, value string, target policy.Target) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value = policy.Normalize(kind, value)
+	normalizeTarget(&target)
+	delete(s.allowlist, entryKey(kind, value, target))
+	return nil
+}
+
 func (s *Store) ListGrants(context.Context) ([]policy.Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -91,6 +102,19 @@ func (s *Store) AddGrant(_ context.Context, grant policy.Grant) error {
 	grant.Value = policy.Normalize(grant.Kind, grant.Value)
 	normalizeTarget(&grant.Target)
 	s.grants[grant.ID] = grant
+	return nil
+}
+
+func (s *Store) DeleteGrants(_ context.Context, kind policy.Kind, value string, target policy.Target) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value = policy.Normalize(kind, value)
+	normalizeTarget(&target)
+	for id, g := range s.grants {
+		if g.Kind == kind && g.Value == value && g.Target.Type == target.Type && g.Target.ID == target.ID {
+			delete(s.grants, id)
+		}
+	}
 	return nil
 }
 
@@ -366,11 +390,39 @@ func (s *Store) ListAllEnrollmentIDs(context.Context) ([]string, error) {
 			}
 		}
 	}
+	for id := range s.devices {
+		set[id] = struct{}{}
+	}
 	out := make([]string, 0, len(set))
 	for id := range set {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func (s *Store) ListDevices(ctx context.Context) ([]store.Device, error) {
+	ids, err := s.ListAllEnrollmentIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.Device, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, store.Device{EnrollmentID: id, Name: s.devices[id]})
+	}
+	return out, nil
+}
+
+func (s *Store) SetDeviceName(_ context.Context, enrollmentID, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return fmt.Errorf("enrollment_id is required")
+	}
+	s.devices[enrollmentID] = strings.TrimSpace(name)
+	return nil
 }
 
 func normalizeTarget(t *policy.Target) {

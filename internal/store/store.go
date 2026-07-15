@@ -60,6 +60,12 @@ type Group struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Device is an enrollment with an optional display name.
+type Device struct {
+	EnrollmentID string `json:"enrollment_id"`
+	Name         string `json:"name"`
+}
+
 // AccessRequest is kept as an alias for older call sites.
 type AccessRequest = Request
 
@@ -70,9 +76,11 @@ type Store interface {
 
 	ListAllowlist(ctx context.Context) ([]policy.Entry, error)
 	UpsertAllowlist(ctx context.Context, entry policy.Entry) error
+	DeleteAllowlist(ctx context.Context, kind policy.Kind, value string, target policy.Target) error
 
 	ListGrants(ctx context.Context) ([]policy.Grant, error)
 	AddGrant(ctx context.Context, grant policy.Grant) error
+	DeleteGrants(ctx context.Context, kind policy.Kind, value string, target policy.Target) error
 
 	CreateRequest(ctx context.Context, req Request) (Request, error)
 	GetRequest(ctx context.Context, id string) (Request, error)
@@ -96,4 +104,7 @@ type Store interface {
 	ListGroupsForDevice(ctx context.Context, enrollmentID string) ([]string, error)
 	ListEnrollmentIDsForGroup(ctx context.Context, groupID string) ([]string, error)
 	ListAllEnrollmentIDs(ctx context.Context) ([]string, error)
+
+	ListDevices(ctx context.Context) ([]Device, error)
+	SetDeviceName(ctx context.Context, enrollmentID, name string) error
 }

@@ -25,9 +25,6 @@ func Load() (Config, error) {
 	if cfg.HTTPAddr == "" {
 		return Config{}, fmt.Errorf("HTTP_ADDR must not be empty")
 	}
-	if len(cfg.AdminTokens) == 0 {
-		return Config{}, fmt.Errorf("ADMIN_TOKENS must include at least one token")
-	}
 	return cfg, nil
 }
 

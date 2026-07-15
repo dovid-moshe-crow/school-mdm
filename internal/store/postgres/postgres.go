@@ -155,6 +155,16 @@ func (s *Store) UpsertAllowlist(ctx context.Context, entry policy.Entry) error {
 	return err
 }
 
+func (s *Store) DeleteAllowlist(ctx context.Context, kind policy.Kind, value string, target policy.Target) error {
+	value = policy.Normalize(kind, value)
+	normalizeTarget(&target)
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM allowlist_entries
+		WHERE kind=$1 AND value=$2 AND target_type=$3 AND target_id=$4
+	`, string(kind), value, string(target.Type), target.ID)
+	return err
+}
+
 func (s *Store) ListGrants(ctx context.Context) ([]policy.Grant, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, kind, value, target_type, target_id, expires_at FROM grants`)
 	if err != nil {
@@ -187,6 +197,16 @@ func (s *Store) AddGrant(ctx context.Context, grant policy.Grant) error {
 		INSERT INTO grants (id, kind, value, target_type, target_id, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, grant.ID, string(grant.Kind), grant.Value, string(grant.Target.Type), grant.Target.ID, grant.ExpiresAt)
+	return err
+}
+
+func (s *Store) DeleteGrants(ctx context.Context, kind policy.Kind, value string, target policy.Target) error {
+	value = policy.Normalize(kind, value)
+	normalizeTarget(&target)
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM grants
+		WHERE kind=$1 AND value=$2 AND target_type=$3 AND target_id=$4
+	`, string(kind), value, string(target.Type), target.ID)
 	return err
 }
 
@@ -516,6 +536,8 @@ func (s *Store) ListAllEnrollmentIDs(ctx context.Context) ([]string, error) {
 			SELECT target_id FROM allowlist_entries WHERE target_type='device' AND target_id <> ''
 			UNION
 			SELECT enrollment_id FROM group_members
+			UNION
+			SELECT enrollment_id FROM devices
 		) t
 		ORDER BY enrollment_id
 	`)
@@ -532,4 +554,48 @@ func (s *Store) ListAllEnrollmentIDs(ctx context.Context) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ListDevices(ctx context.Context) ([]store.Device, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT ids.id, COALESCE(d.name, '') FROM (
+			SELECT enrollment_id AS id FROM requests WHERE enrollment_id <> ''
+			UNION
+			SELECT target_id FROM grants WHERE target_type='device' AND target_id <> ''
+			UNION
+			SELECT target_id FROM allowlist_entries WHERE target_type='device' AND target_id <> ''
+			UNION
+			SELECT enrollment_id FROM group_members
+			UNION
+			SELECT enrollment_id FROM devices
+		) ids
+		LEFT JOIN devices d ON d.enrollment_id = ids.id
+		ORDER BY COALESCE(NULLIF(d.name, ''), ids.id)
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Device
+	for rows.Next() {
+		var d store.Device
+		if err := rows.Scan(&d.EnrollmentID, &d.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetDeviceName(ctx context.Context, enrollmentID, name string) error {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return fmt.Errorf("enrollment_id is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO devices (enrollment_id, name, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (enrollment_id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+	`, enrollmentID, strings.TrimSpace(name))
+	return err
 }

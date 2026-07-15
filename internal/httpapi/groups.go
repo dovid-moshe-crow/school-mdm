@@ -250,3 +250,33 @@ func parseAllowanceDuration(d string, now time.Time) (expires *time.Time, perman
 		return nil, false, errors.New("unsupported duration (use 15m, 1h, 24h, today, permanent)")
 	}
 }
+
+func (a *API) handleDeleteAllowance(w http.ResponseWriter, r *http.Request) {
+	kind := policy.Kind(strings.TrimSpace(r.URL.Query().Get("kind")))
+	value := strings.TrimSpace(r.URL.Query().Get("value"))
+	tt := policy.TargetType(strings.TrimSpace(r.URL.Query().Get("target_type")))
+	tid := strings.TrimSpace(r.URL.Query().Get("target_id"))
+	if tt == "" {
+		tt = policy.TargetGlobal
+	}
+	if kind != policy.KindApp && kind != policy.KindURL {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be app or url"})
+		return
+	}
+	for _, e := range policy.Essentials {
+		if kind == policy.KindApp && policy.Normalize(kind, value) == e {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot remove essential app"})
+			return
+		}
+	}
+	target := policy.Target{Type: tt, ID: tid}
+	if err := a.Store.DeleteAllowlist(r.Context(), kind, value, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := a.Store.DeleteGrants(r.Context(), kind, value, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
