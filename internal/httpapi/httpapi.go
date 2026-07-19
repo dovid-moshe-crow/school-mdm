@@ -47,8 +47,12 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/apps/{bundleID}", a.handleAppLookup)
 	mux.HandleFunc("GET /api/access-status", a.handleAccessStatus)
 	mux.HandleFunc("GET /api/device/{deviceID}/requests", a.handleDeviceRequests)
+	mux.HandleFunc("POST /api/device/{deviceID}/requests/{id}/messages", a.handleDevicePostMessage)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
 	mux.HandleFunc("GET /api/requests", a.handleListRequests)
+	mux.HandleFunc("GET /api/requests/{id}", a.handleGetRequest)
+	mux.HandleFunc("GET /api/requests/{id}/messages", a.handleListMessages)
+	mux.HandleFunc("POST /api/requests/{id}/messages", a.handleAdminPostMessage)
 	mux.HandleFunc("POST /api/requests/{id}/approve", a.handleApprove)
 	mux.HandleFunc("POST /api/requests/{id}/deny", a.handleDeny)
 	mux.HandleFunc("GET /api/stub-commands", a.handleStubCommands)
@@ -101,12 +105,19 @@ func (a *API) handleAppLookup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app catalog unavailable"})
 		return
 	}
-	meta, err := a.Catalog.LookupBundle(r.Context(), bundleID)
+	refresh := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("full") == "1"
+	meta, err := a.Catalog.LookupBundleOpt(r.Context(), bundleID, refresh)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, meta)
+	row := appMetaJSON(meta)
+	if enrollment := strings.TrimSpace(r.URL.Query().Get("enrollment_id")); enrollment != "" {
+		if st, err := a.accessStatus(r, enrollment, policy.KindApp, meta.BundleID); err == nil {
+			row["access_status"] = st
+		}
+	}
+	writeJSON(w, http.StatusOK, row)
 }
 
 type createRequestBody struct {
@@ -141,6 +152,95 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.Catalog.LookupBundle(r.Context(), req.Value)
 	}
 	writeJSON(w, http.StatusCreated, req)
+}
+
+func (a *API) handleGetRequest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	req, err := a.Store.GetRequest(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	item := a.enrichRequest(r, req)
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (a *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	// Optional device ownership check for portal privacy
+	if device := strings.TrimSpace(r.URL.Query().Get("enrollment_id")); device != "" {
+		req, err := a.Store.GetRequest(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+				return
+			}
+			writeErr(w, err)
+			return
+		}
+		if req.EnrollmentID != device {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "device does not own this request"})
+			return
+		}
+	}
+	msgs, err := a.Store.ListRequestMessages(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, msgs)
+}
+
+type postMessageBody struct {
+	Body string `json:"body"`
+}
+
+func (a *API) handleAdminPostMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body postMessageBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	msg, err := a.Service.PostMessage(r.Context(), approvals.PostMessageInput{
+		RequestID:  id,
+		AuthorRole: store.AuthorAdmin,
+		Body:       body.Body,
+	})
+	if err != nil {
+		writeDecideErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (a *API) handleDevicePostMessage(w http.ResponseWriter, r *http.Request) {
+	deviceID := strings.TrimSpace(r.PathValue("deviceID"))
+	id := r.PathValue("id")
+	var body postMessageBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	msg, err := a.Service.PostMessage(r.Context(), approvals.PostMessageInput{
+		RequestID:    id,
+		AuthorRole:   store.AuthorStudent,
+		Body:         body.Body,
+		EnrollmentID: deviceID,
+	})
+	if err != nil {
+		writeDecideErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, msg)
 }
 
 type decideBody struct {

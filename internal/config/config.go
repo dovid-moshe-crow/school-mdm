@@ -12,6 +12,10 @@ type Config struct {
 	DatabaseURL   string
 	AdminTokens   []string
 	PortalBaseURL string
+	// ItunesCountry is the App Store storefront (default il).
+	ItunesCountry string
+	// ItunesLang is the iTunes language tag (default he_il).
+	ItunesLang string
 }
 
 // Load reads configuration from the process environment.
@@ -21,6 +25,8 @@ func Load() (Config, error) {
 		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		AdminTokens:   splitCSV(getenv("ADMIN_TOKENS", "dev-admin-token")),
 		PortalBaseURL: strings.TrimRight(getenv("PORTAL_BASE_URL", "http://localhost:8080"), "/"),
+		ItunesCountry: getenv("ITUNES_COUNTRY", "il"),
+		ItunesLang:    getenv("ITUNES_LANG", "he_il"),
 	}
 	if cfg.HTTPAddr == "" {
 		return Config{}, fmt.Errorf("HTTP_ADDR must not be empty")

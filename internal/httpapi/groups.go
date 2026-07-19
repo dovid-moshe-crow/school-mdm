@@ -20,6 +20,12 @@ func (a *API) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Group{}
 	}
+	for i := range list {
+		members, err := a.Store.ListGroupMembers(r.Context(), list[i].ID)
+		if err == nil {
+			list[i].MemberCount = len(members)
+		}
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 

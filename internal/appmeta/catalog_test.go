@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +28,7 @@ func TestFetchAndiTunesUpsert(t *testing.T) {
 
 	mem := memory.New()
 	cat := &Catalog{Store: mem, Client: srv.Client()}
-	list, err := cat.fetchiTunes(context.Background(), srv.URL)
+	list, err := cat.fetchiTunes(context.Background(), srv.URL, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,9 +48,11 @@ func TestFetchAndiTunesUpsert(t *testing.T) {
 func TestLookupBundleUsesCache(t *testing.T) {
 	mem := memory.New()
 	_ = mem.UpsertAppMeta(context.Background(), store.AppMeta{
-		BundleID:  "com.school.cached",
-		Name:      "Cached",
-		UpdatedAt: time.Now().UTC(),
+		BundleID:    "com.school.cached",
+		Name:        "Cached",
+		Genre:       "Education",
+		Description: "תיאור בעברית",
+		UpdatedAt:   time.Now().UTC(),
 	})
 	cat := &Catalog{Store: mem, Client: http.DefaultClient}
 	got, err := cat.LookupBundle(context.Background(), "com.school.cached")
@@ -57,6 +61,51 @@ func TestLookupBundleUsesCache(t *testing.T) {
 	}
 	if got.Source != "cache" || got.Name != "Cached" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestSearchReturnsCacheImmediately(t *testing.T) {
+	mem := memory.New()
+	_ = mem.UpsertAppMeta(context.Background(), store.AppMeta{
+		BundleID:  "com.google.ios.youtube",
+		Name:      "YouTube",
+		Artist:    "Google",
+		UpdatedAt: time.Now().UTC(),
+	})
+	// Slow remote: Search must not wait on it when the DB already has hits.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		_, _ = w.Write([]byte(`{"resultCount":0,"results":[]}`))
+	}))
+	defer slow.Close()
+
+	cat := &Catalog{
+		Store:  mem,
+		Client: slow.Client(),
+	}
+	// Point Client at slow server; searchiTunes still targets itunes.apple.com.
+	// Warm-cache path returns before any remote round-trip.
+	start := time.Now()
+	list, err := cat.Search(context.Background(), "youtube", 10)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) == 0 || list[0].Name != "YouTube" {
+		t.Fatalf("%+v", list)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Search blocked too long with warm cache: %v", elapsed)
+	}
+}
+
+func TestItunesURLIncludesCountryAndLang(t *testing.T) {
+	cat := &Catalog{Country: "il", Lang: "he_il"}
+	params := url.Values{}
+	params.Set("term", "test")
+	raw := cat.itunesURL("search", params)
+	if !strings.Contains(raw, "country=il") || !strings.Contains(raw, "lang=he_il") {
+		t.Fatalf("url missing storefront params: %s", raw)
 	}
 }
 

@@ -88,8 +88,8 @@ func TestApproveGeneralWithoutEnqueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decided.Status != store.StatusApproved {
-		t.Fatalf("status=%s", decided.Status)
+	if decided.Status != store.StatusResolved {
+		t.Fatalf("status=%s want resolved", decided.Status)
 	}
 	if len(stub.Snapshot()) != 0 {
 		t.Fatal("general approve should not enqueue MDM")
@@ -171,6 +171,59 @@ func TestApproveGroupScopeFansOut(t *testing.T) {
 	}
 	if len(stub.Snapshot()) < 2 {
 		t.Fatalf("expected fan-out enqueue for both members, got %d", len(stub.Snapshot()))
+	}
+}
+
+func TestRequestMessageThreadAndReopen(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	svc := &Service{Store: mem, Enqueue: &mdm.StubEnqueuer{}, PortalURL: "http://localhost:8080"}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeGeneral,
+		Value:        "Wifi down",
+		EnrollmentID: "dev-1",
+		Reason:       "Cannot connect in room 12",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := mem.ListRequestMessages(ctx, req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].AuthorRole != store.AuthorStudent {
+		t.Fatalf("expected seeded student message, got %#v", msgs)
+	}
+
+	if _, err := svc.Decide(ctx, DecideInput{RequestID: req.ID, Approve: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PostMessage(ctx, PostMessageInput{
+		RequestID:  req.ID,
+		AuthorRole: store.AuthorAdmin,
+		Body:       "Router was reset — try again",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := svc.PostMessage(ctx, PostMessageInput{
+		RequestID:    req.ID,
+		AuthorRole:   store.AuthorStudent,
+		Body:         "Still broken",
+		EnrollmentID: "dev-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Body != "Still broken" {
+		t.Fatal(reopened.Body)
+	}
+	got, err := mem.GetRequest(ctx, req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusPending {
+		t.Fatalf("student reply should reopen, status=%s", got.Status)
 	}
 }
 

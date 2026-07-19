@@ -20,11 +20,28 @@ const (
 type RequestStatus string
 
 const (
-	StatusPending  RequestStatus = "pending"
-	StatusApproved RequestStatus = "approved" // access granted / general accepted
-	StatusDenied   RequestStatus = "denied"
-	StatusResolved RequestStatus = "resolved" // bug closed / fixed
+	StatusPending  RequestStatus = "pending"  // waiting for admin / open conversation
+	StatusApproved RequestStatus = "approved" // access: allowlist granted
+	StatusDenied   RequestStatus = "denied"   // access denied / request rejected
+	StatusResolved RequestStatus = "resolved" // general/bug closed / handled
 )
+
+// MessageAuthor is who wrote a request message.
+type MessageAuthor string
+
+const (
+	AuthorStudent MessageAuthor = "student"
+	AuthorAdmin   MessageAuthor = "admin"
+)
+
+// RequestMessage is one turn in a student↔admin conversation.
+type RequestMessage struct {
+	ID         string        `json:"id"`
+	RequestID  string        `json:"request_id"`
+	AuthorRole MessageAuthor `json:"author_role"`
+	Body       string        `json:"body"`
+	CreatedAt  time.Time     `json:"created_at"`
+}
 
 // Request is a student ticket (access, general, or bug).
 type Request struct {
@@ -50,6 +67,19 @@ type AppMeta struct {
 	StoreURL   string    `json:"store_url"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	Source     string    `json:"source,omitempty"` // "cache" | "itunes"
+
+	// Optional fields from iTunes Lookup (shown in details).
+	Description    string   `json:"description,omitempty"`
+	Genre          string   `json:"genre,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	AverageRating  float64  `json:"average_rating,omitempty"`
+	RatingCount    int      `json:"rating_count,omitempty"`
+	ContentRating  string   `json:"content_rating,omitempty"`
+	ReleaseDate    string   `json:"release_date,omitempty"`
+	FormattedPrice string   `json:"formatted_price,omitempty"`
+	FileSizeBytes  int64    `json:"file_size_bytes,omitempty"`
+	SellerName     string   `json:"seller_name,omitempty"`
+	Screenshots    []string `json:"screenshots,omitempty"`
 }
 
 // Group is a named set of device enrollments for scoped allowlists.
@@ -58,6 +88,7 @@ type Group struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
+	MemberCount int       `json:"member_count,omitempty"`
 }
 
 // Device is an enrollment with an optional display name.
@@ -86,6 +117,11 @@ type Store interface {
 	GetRequest(ctx context.Context, id string) (Request, error)
 	ListRequests(ctx context.Context, status *RequestStatus) ([]Request, error)
 	UpdateRequest(ctx context.Context, req Request) error
+
+	ListRequestMessages(ctx context.Context, requestID string) ([]RequestMessage, error)
+	AddRequestMessage(ctx context.Context, msg RequestMessage) (RequestMessage, error)
+	CountRequestMessages(ctx context.Context, requestID string) (int, error)
+	LastRequestMessage(ctx context.Context, requestID string) (RequestMessage, error)
 
 	GetAppMeta(ctx context.Context, bundleID string) (AppMeta, error)
 	UpsertAppMeta(ctx context.Context, meta AppMeta) error

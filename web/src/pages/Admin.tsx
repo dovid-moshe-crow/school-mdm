@@ -1,15 +1,58 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  App,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Col,
+  Drawer,
+  Empty,
+  Flex,
+  Input,
+  List,
+  Row,
+  Segmented,
+  Select,
+  Skeleton,
+  Space,
+  Spin,
+  Tabs,
+  Tag,
+  Typography,
+} from 'antd'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  parseAsString,
+  parseAsStringLiteral,
+  useQueryState,
+  useQueryStates,
+} from 'nuqs'
+import { useEffect, useMemo, useState } from 'react'
 import { api, type Allowance, type AppMeta, type Device, type Group, type Request } from '../api'
-import { he } from '../he'
+import { RequestThread } from '../components/RequestThread'
+import { he, statusClass, adminNextAction } from '../he'
+import { AppThumb, useDebounced } from '../ui'
 
-type Tab = 'requests' | 'groups' | 'allowances'
+const tabKeys = ['requests', 'groups', 'allowances', 'devices'] as const
+type TabKey = (typeof tabKeys)[number]
+
+const allowScopes = ['global', 'group', 'device', 'all'] as const
 
 function labelDevice(d: Device | string, devices: Device[]) {
   if (typeof d === 'string') {
     const found = devices.find((x) => x.enrollment_id === d)
-    return found?.name ? `${found.name} (${d})` : d
+    if (!found) return d
+    return found.name || d
   }
-  return d.name ? `${d.name} (${d.enrollment_id})` : d.enrollment_id
+  return d.name || d.enrollment_id
+}
+
+function deviceSub(d: Device | string, devices: Device[]) {
+  if (typeof d === 'string') {
+    const found = devices.find((x) => x.enrollment_id === d)
+    return found?.name ? d : ''
+  }
+  return d.name ? d.enrollment_id : ''
 }
 
 function sourceLabel(src: string) {
@@ -21,36 +64,91 @@ function sourceLabel(src: string) {
   return src
 }
 
-export default function Admin() {
-  const [tab, setTab] = useState<Tab>('requests')
-  const [error, setError] = useState('')
-  const [ok, setOk] = useState('')
-  const [devices, setDevices] = useState<Device[]>([])
-  const [groups, setGroups] = useState<Group[]>([])
-  const [memberCounts, setMemberCounts] = useState<Record<string, number>>({})
-  const [requests, setRequests] = useState<Request[]>([])
-  const [allowances, setAllowances] = useState<Allowance[]>([])
-  const [busy, setBusy] = useState(false)
+function whyLine(row: Allowance, groups: Group[], devices: Device[]) {
+  const src = sourceLabel(row.source)
+  if (row.source === 'essential') return src
+  if (row.group_id) {
+    const g = groups.find((x) => x.id === row.group_id)
+    return `${src}${g ? ` · ${g.name}` : ''}`
+  }
+  if (row.enrollment_id) return `${src} · ${labelDevice(row.enrollment_id, devices)}`
+  if (row.expires_at) {
+    try {
+      return `${src} · עד ${new Date(row.expires_at).toLocaleString('he-IL')}`
+    } catch {
+      return src
+    }
+  }
+  return src
+}
 
-  const [reqStatus, setReqStatus] = useState('pending')
-  const [reqType, setReqType] = useState('all')
-  const [reqDevice, setReqDevice] = useState('')
-  const [reqQ, setReqQ] = useState('')
+function nextTagColor(kind: string, status: string) {
+  if (kind === 'act') return 'processing'
+  if (kind === 'wait') return 'warning'
+  if (statusClass(status) === 'bad') return 'error'
+  return 'success'
+}
+
+function sortRequests(list: Request[]) {
+  const next = [...list]
+  next.sort((a, b) => {
+    const score = (r: Request) => {
+      if (r.status !== 'pending') return 2
+      if (r.last_message?.author_role === 'admin') return 1
+      return 0
+    }
+    const d = score(a) - score(b)
+    if (d !== 0) return d
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  })
+  return next
+}
+
+function LoadingBlock({ tip }: { tip?: string }) {
+  return (
+    <div style={{ textAlign: 'center', padding: 32 }}>
+      <Spin tip={tip} />
+    </div>
+  )
+}
+
+export default function Admin() {
+  const { message, modal } = App.useApp()
+  const qc = useQueryClient()
+
+  const [tab, setTab] = useQueryState(
+    'tab',
+    parseAsStringLiteral(tabKeys).withDefault('requests'),
+  )
+  const [reqFilters, setReqFilters] = useQueryStates({
+    status: parseAsString.withDefault('pending'),
+    type: parseAsString.withDefault('all'),
+    device: parseAsString.withDefault(''),
+    q: parseAsString.withDefault(''),
+  })
+  const [selectedReqId, setSelectedReqId] = useQueryState('request', parseAsString)
+  const [selectedGroupId, setSelectedGroupId] = useQueryState('group', parseAsString)
+  const [allowFilters, setAllowFilters] = useQueryStates({
+    ascope: parseAsStringLiteral(allowScopes).withDefault('global'),
+    akind: parseAsString.withDefault('all'),
+    adevice: parseAsString.withDefault(''),
+    agroup: parseAsString.withDefault(''),
+    aq: parseAsString.withDefault(''),
+  })
+
+  const debouncedReqQ = useDebounced(reqFilters.q, 300)
+  const debouncedAllowQ = useDebounced(allowFilters.aq, 300)
+
   const [approveScope, setApproveScope] = useState<Record<string, string>>({})
   const [approveGroup, setApproveGroup] = useState<Record<string, string>>({})
 
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
-  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null)
   const [members, setMembers] = useState<string[]>([])
   const [memberFilter, setMemberFilter] = useState('')
   const [renameDraft, setRenameDraft] = useState('')
 
-  const [allowScope, setAllowScope] = useState('global')
-  const [allowKind, setAllowKind] = useState('all')
-  const [allowDevice, setAllowDevice] = useState('')
-  const [allowGroup, setAllowGroup] = useState('')
-  const [allowQ, setAllowQ] = useState('')
+  const [addOpen, setAddOpen] = useState(false)
   const [addKind, setAddKind] = useState('url')
   const [addScope, setAddScope] = useState('global')
   const [addGroup, setAddGroup] = useState('')
@@ -58,70 +156,148 @@ export default function Admin() {
   const [addDuration, setAddDuration] = useState('permanent')
   const [addValue, setAddValue] = useState('')
   const [addAppQ, setAddAppQ] = useState('')
-  const [addResults, setAddResults] = useState<AppMeta[]>([])
+  const debouncedAddAppQ = useDebounced(addAppQ, 320)
   const [addApp, setAddApp] = useState<AppMeta | null>(null)
 
-  const flash = (msg: string, isErr = false) => {
-    if (isErr) { setError(msg); setOk('') } else { setOk(msg); setError('') }
-  }
+  const devicesQuery = useQuery({
+    queryKey: ['devices'],
+    queryFn: () => api.devices(),
+  })
+  const groupsQuery = useQuery({
+    queryKey: ['groups'],
+    queryFn: () => api.groups(),
+  })
+  const devices = devicesQuery.data ?? []
+  const groups = groupsQuery.data ?? []
 
-  const refreshMeta = useCallback(async () => {
-    const [d, g] = await Promise.all([api.devices(), api.groups()])
-    setDevices(d)
-    setGroups(g)
-    const counts: Record<string, number> = {}
-    await Promise.all(
-      g.map(async (group) => {
-        const m = await api.members(group.id)
-        counts[group.id] = m.length
-      }),
-    )
-    setMemberCounts(counts)
-  }, [])
+  const pendingQuery = useQuery({
+    queryKey: ['requests', 'pending-count'],
+    queryFn: async () => {
+      const list = await api.requests(new URLSearchParams({ status: 'pending' }))
+      return list.length
+    },
+  })
+  const pendingCount = pendingQuery.data ?? 0
 
-  const loadRequests = useCallback(async () => {
-    setBusy(true)
-    try {
-      const p = new URLSearchParams({ status: reqStatus, type: reqType, sort: 'created_desc' })
-      if (reqDevice) p.set('enrollment_id', reqDevice)
-      if (reqQ.trim()) p.set('q', reqQ.trim())
-      const list = await api.requests(p)
-      setRequests(list)
-      setApproveScope((prev) => {
-        const next = { ...prev }
-        for (const r of list) if (!next[r.id]) next[r.id] = 'device'
-        return next
+  const requestsQuery = useQuery({
+    queryKey: ['requests', reqFilters.status, reqFilters.type, reqFilters.device, debouncedReqQ],
+    queryFn: async () => {
+      const p = new URLSearchParams({
+        status: reqFilters.status,
+        type: reqFilters.type,
+        sort: 'created_desc',
       })
-    } catch (e) {
-      flash((e as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }, [reqStatus, reqType, reqDevice, reqQ])
+      if (reqFilters.device) p.set('enrollment_id', reqFilters.device)
+      if (debouncedReqQ.trim()) p.set('q', debouncedReqQ.trim())
+      return sortRequests(await api.requests(p))
+    },
+    enabled: tab === 'requests',
+    placeholderData: keepPreviousData,
+  })
+  const requests = requestsQuery.data ?? []
 
-  const loadAllowances = useCallback(async () => {
-    if (allowScope === 'device' && !allowDevice) return setAllowances([])
-    if (allowScope === 'group' && !allowGroup) return setAllowances([])
-    setBusy(true)
-    try {
-      const p = new URLSearchParams({ scope: allowScope, kind: allowKind })
-      if (allowScope === 'device') p.set('enrollment_id', allowDevice)
-      if (allowScope === 'group') p.set('group_id', allowGroup)
-      if (allowQ.trim()) p.set('q', allowQ.trim())
-      setAllowances(await api.allowances(p))
-    } catch (e) {
-      flash((e as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }, [allowScope, allowKind, allowDevice, allowGroup, allowQ])
+  const allowancesEnabled =
+    tab === 'allowances' &&
+    !(allowFilters.ascope === 'device' && !allowFilters.adevice) &&
+    !(allowFilters.ascope === 'group' && !allowFilters.agroup)
 
-  useEffect(() => { refreshMeta().catch((e) => flash((e as Error).message, true)) }, [refreshMeta])
+  const allowancesQuery = useQuery({
+    queryKey: [
+      'allowances',
+      allowFilters.ascope,
+      allowFilters.akind,
+      allowFilters.adevice,
+      allowFilters.agroup,
+      debouncedAllowQ,
+    ],
+    queryFn: async () => {
+      const p = new URLSearchParams({ scope: allowFilters.ascope, kind: allowFilters.akind })
+      if (allowFilters.ascope === 'device') p.set('enrollment_id', allowFilters.adevice)
+      if (allowFilters.ascope === 'group') p.set('group_id', allowFilters.agroup)
+      if (debouncedAllowQ.trim()) p.set('q', debouncedAllowQ.trim())
+      return api.allowances(p)
+    },
+    enabled: allowancesEnabled,
+    placeholderData: keepPreviousData,
+  })
+  const allowances =
+    tab === 'allowances' &&
+    ((allowFilters.ascope === 'device' && !allowFilters.adevice) ||
+      (allowFilters.ascope === 'group' && !allowFilters.agroup))
+      ? []
+      : (allowancesQuery.data ?? [])
+
+  const membersQuery = useQuery({
+    queryKey: ['group-members', selectedGroupId],
+    queryFn: () => api.members(selectedGroupId!),
+    enabled: tab === 'groups' && !!selectedGroupId,
+  })
+
+  const addAppsQuery = useQuery({
+    queryKey: ['app-search', 'admin-add', debouncedAddAppQ],
+    queryFn: () => api.searchApps(debouncedAddAppQ.trim()),
+    enabled: addOpen && addKind === 'app' && !!debouncedAddAppQ.trim(),
+    placeholderData: keepPreviousData,
+  })
+  const addResults = addAppsQuery.data ?? []
+
   useEffect(() => {
-    if (tab === 'requests') loadRequests()
-    if (tab === 'allowances') loadAllowances()
-    if (tab === 'groups') refreshMeta()
-  }, [tab, loadRequests, loadAllowances, refreshMeta])
+    if (requestsQuery.isError) message.error((requestsQuery.error as Error).message)
+  }, [requestsQuery.isError, requestsQuery.error, message])
+
+  useEffect(() => {
+    if (allowancesQuery.isError) message.error((allowancesQuery.error as Error).message)
+  }, [allowancesQuery.isError, allowancesQuery.error, message])
+
+  useEffect(() => {
+    if (devicesQuery.isError) message.error((devicesQuery.error as Error).message)
+  }, [devicesQuery.isError, devicesQuery.error, message])
+
+  useEffect(() => {
+    if (groupsQuery.isError) message.error((groupsQuery.error as Error).message)
+  }, [groupsQuery.isError, groupsQuery.error, message])
+
+  useEffect(() => {
+    setApproveScope((prev) => {
+      const next = { ...prev }
+      for (const r of requests) {
+        if (!next[r.id]) next[r.id] = 'device'
+      }
+      return next
+    })
+  }, [requests])
+
+  useEffect(() => {
+    if (groups.length !== 1) return
+    setApproveGroup((prev) => {
+      const next = { ...prev }
+      for (const r of requests) {
+        if (!next[r.id]) next[r.id] = groups[0].id
+      }
+      return next
+    })
+  }, [groups, requests])
+
+  useEffect(() => {
+    if (!selectedReqId || !requestsQuery.isSuccess) return
+    if (!requests.some((r) => r.id === selectedReqId)) {
+      void setSelectedReqId(null)
+    }
+  }, [selectedReqId, requests, requestsQuery.isSuccess, setSelectedReqId])
+
+  const selectedGroup = useMemo(
+    () => groups.find((g) => g.id === selectedGroupId) || null,
+    [groups, selectedGroupId],
+  )
+
+  useEffect(() => {
+    if (!selectedGroup) return
+    setRenameDraft(selectedGroup.name)
+  }, [selectedGroup])
+
+  useEffect(() => {
+    if (membersQuery.data) setMembers(membersQuery.data)
+  }, [membersQuery.data])
 
   const filteredDevices = useMemo(() => {
     const q = memberFilter.trim().toLowerCase()
@@ -131,509 +307,897 @@ export default function Admin() {
     )
   }, [devices, memberFilter])
 
-  async function decide(id: string, approve: boolean, duration = '') {
-    const prev = requests
-    setRequests((list) => list.filter((r) => r.id !== id))
-    try {
-      const body: Record<string, string> = { duration }
+  const selectedReq =
+    requests.find((x) => x.id === selectedReqId) ||
+    (!selectedReqId ? requests[0] ?? null : null)
+
+  async function refreshMeta() {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['devices'] }),
+      qc.invalidateQueries({ queryKey: ['groups'] }),
+      qc.invalidateQueries({ queryKey: ['requests', 'pending-count'] }),
+    ])
+  }
+
+  const decideMutation = useMutation({
+    mutationFn: async ({
+      id,
+      approve,
+      duration,
+    }: {
+      id: string
+      approve: boolean
+      duration?: string
+    }) => {
+      const body: Record<string, string> = { duration: duration || '' }
       if (approve) {
         body.scope = approveScope[id] || 'device'
         if (body.scope === 'group') body.group_id = approveGroup[id] || ''
       }
-      await api.decide(id, approve, body)
-      flash(he.ok)
-      refreshMeta()
-    } catch (e) {
-      setRequests(prev)
-      flash((e as Error).message, true)
-    }
+      return api.decide(id, approve, body)
+    },
+    onSuccess: async () => {
+      message.success(he.ok)
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['requests'] }),
+        refreshMeta(),
+      ])
+    },
+    onError: (e) => message.error((e as Error).message),
+  })
+
+  async function openGroup(g: Group) {
+    await setSelectedGroupId(g.id)
   }
 
+  const metaLoading =
+    (tab === 'groups' || tab === 'devices') &&
+    (devicesQuery.isLoading || groupsQuery.isLoading)
+  const requestsLoading = tab === 'requests' && requestsQuery.isLoading && !requestsQuery.data
+  const requestsFetching = tab === 'requests' && requestsQuery.isFetching
+  const allowancesLoading =
+    tab === 'allowances' && allowancesEnabled && allowancesQuery.isLoading && !allowancesQuery.data
+  const allowancesFetching = tab === 'allowances' && allowancesEnabled && allowancesQuery.isFetching
+
   return (
-    <main className="shell wide">
-      <h1 className="brand">{he.admin}</h1>
-      <p className="lede">{he.adminLead}</p>
+    <div className="page-shell wide">
+      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        <div>
+          <Typography.Title level={2} style={{ marginBottom: 8 }}>
+            {he.admin}
+          </Typography.Title>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            {he.adminLead}
+          </Typography.Paragraph>
+        </div>
 
-      <div className="tabs">
-        {([
-          ['requests', he.tabRequests],
-          ['groups', he.tabGroups],
-          ['allowances', he.tabAllow],
-        ] as const).map(([k, label]) => (
-          <button key={k} type="button" className={`tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {error && <div className="msg err">{error}</div>}
-      {ok && <div className="msg ok">{ok}</div>}
-      {busy && <p className="count">{he.loading}</p>}
-
-      {tab === 'requests' && (
-        <>
-          <div className="panel filters">
-            <div className="filters-row">
-              <div>
-                <label>{he.status}</label>
-                <select value={reqStatus} onChange={(e) => setReqStatus(e.target.value)}>
-                  <option value="all">{he.all}</option>
-                  <option value="pending">{he.pending}</option>
-                  <option value="open">{he.open}</option>
-                  <option value="closed">{he.closed}</option>
-                  <option value="approved">{he.approved}</option>
-                  <option value="denied">{he.denied}</option>
-                  <option value="resolved">{he.resolved}</option>
-                </select>
-              </div>
-              <div>
-                <label>{he.type}</label>
-                <select value={reqType} onChange={(e) => setReqType(e.target.value)}>
-                  <option value="all">{he.all}</option>
-                  <option value="access">{he.typeLabel.access}</option>
-                  <option value="general">{he.typeLabel.general}</option>
-                  <option value="bug">{he.typeLabel.bug}</option>
-                </select>
-              </div>
-              <div>
-                <label>{he.device}</label>
-                <select value={reqDevice} onChange={(e) => setReqDevice(e.target.value)}>
-                  <option value="">{he.all}</option>
-                  {devices.map((d) => (
-                    <option key={d.enrollment_id} value={d.enrollment_id}>{labelDevice(d, devices)}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <input value={reqQ} onChange={(e) => setReqQ(e.target.value)} placeholder={he.searchPlaceholder} />
-          </div>
-          {!requests.length && !busy && <div className="panel">{he.emptyRequests}</div>}
-          {requests.map((r) => (
-            <div className="card" key={r.id}>
-              <span className="badge">{he.statusLabel[r.status] || r.status}</span>
-              <span className="badge">{he.typeLabel[r.type] || r.type}</span>
-              {r.kind && <span className="badge">{r.kind === 'app' ? 'אפליקציה' : 'אתר'}</span>}
-              <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                {r.app?.artwork_url && <img src={r.app.artwork_url} alt="" width={44} height={44} style={{ borderRadius: 10 }} />}
-                <div>
-                  <strong>{r.app?.app_name || r.value}</strong>
-                  <div className="meta"><code>{r.value}</code></div>
-                </div>
-              </div>
-              <div className="meta">{he.device}: {labelDevice(r.enrollment_id, devices)}</div>
-              <div className="meta">{r.reason}</div>
-              {r.status === 'pending' && r.type === 'access' && (
-                <>
-                  <div className="filters-row" style={{ marginTop: '0.5rem' }}>
-                    <div>
-                      <label>{he.grantScope}</label>
-                      <select
-                        value={approveScope[r.id] || 'device'}
-                        onChange={(e) => setApproveScope((s) => ({ ...s, [r.id]: e.target.value }))}
-                      >
-                        <option value="device">{he.thisDevice}</option>
-                        <option value="group">{he.aGroup}</option>
-                        <option value="global">{he.everyone}</option>
-                      </select>
-                    </div>
-                    {(approveScope[r.id] || 'device') === 'group' && (
-                      <div>
-                        <label>{he.group}</label>
-                        <select
-                          value={approveGroup[r.id] || ''}
-                          onChange={(e) => setApproveGroup((s) => ({ ...s, [r.id]: e.target.value }))}
-                        >
-                          <option value="">…</option>
-                          {groups.map((g) => (
-                            <option key={g.id} value={g.id}>{g.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-                  </div>
-                  <div className="actions">
-                    <button type="button" className="approve" onClick={() => decide(r.id, true, '1h')}>{he.approve1h}</button>
-                    <button type="button" className="approve" onClick={() => decide(r.id, true, 'permanent')}>{he.approveForever}</button>
-                    <button type="button" className="deny" onClick={() => decide(r.id, false)}>{he.deny}</button>
-                  </div>
-                </>
-              )}
-              {r.status === 'pending' && r.type !== 'access' && (
-                <div className="actions">
-                  <button type="button" className="approve" onClick={() => decide(r.id, true)}>
-                    {r.type === 'bug' ? he.resolve : he.approveForever}
-                  </button>
-                  <button type="button" className="deny" onClick={() => decide(r.id, false)}>{he.deny}</button>
-                </div>
-              )}
-            </div>
-          ))}
-        </>
-      )}
-
-      {tab === 'groups' && (
-        <>
-          <div className="panel" style={{ marginBottom: '1rem' }}>
-            <strong>{he.createGroup}</strong>
-            <label>{he.groupName}</label>
-            <input value={newName} onChange={(e) => setNewName(e.target.value)} />
-            <label>{he.groupDesc}</label>
-            <input value={newDesc} onChange={(e) => setNewDesc(e.target.value)} />
-            <button
-              type="button"
-              className="approve"
-              style={{ width: '100%' }}
-              disabled={!newName.trim()}
-              onClick={async () => {
-                try {
-                  await api.createGroup(newName.trim(), newDesc.trim())
-                  setNewName('')
-                  setNewDesc('')
-                  flash(he.ok)
-                  refreshMeta()
-                } catch (e) {
-                  flash((e as Error).message, true)
-                }
-              }}
-            >
-              {he.createGroup}
-            </button>
-          </div>
-
-          <div className="panel" style={{ marginBottom: '1rem' }}>
-            <strong>{he.nickname}</strong>
-            <p className="meta">כינוי ידידותי למכשירים ברשימות.</p>
-            {devices.map((d) => (
-              <div key={d.enrollment_id} className="row" style={{ marginTop: '0.5rem' }}>
-                <input
-                  defaultValue={d.name}
-                  placeholder={d.enrollment_id}
-                  onBlur={async (e) => {
-                    const name = e.target.value.trim()
-                    if (name === d.name) return
-                    try {
-                      await api.setDeviceName(d.enrollment_id, name)
-                      flash(he.ok)
-                      refreshMeta()
-                    } catch (err) {
-                      flash((err as Error).message, true)
-                    }
-                  }}
-                />
-                <code className="meta" style={{ alignSelf: 'center' }}>{d.enrollment_id}</code>
-              </div>
-            ))}
-          </div>
-
-          {!groups.length && <div className="panel">{he.noGroups}</div>}
-          {groups.map((g) => (
-            <div className="card" key={g.id}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <div>
-                  <strong>{g.name}</strong>
-                  <span className="badge">{he.memberCount}: {memberCounts[g.id] ?? 0}</span>
-                  <div className="meta">{g.description}</div>
-                </div>
-                <div className="actions">
-                  <button
-                    type="button"
-                    className="tiny secondary"
-                    onClick={async () => {
-                      setSelectedGroup(g)
-                      setRenameDraft(g.name)
-                      setMembers(await api.members(g.id))
-                    }}
-                  >
-                    {he.members}
-                  </button>
-                  <button
-                    type="button"
-                    className="tiny secondary"
-                    onClick={() => {
-                      setTab('allowances')
-                      setAllowScope('group')
-                      setAllowGroup(g.id)
-                    }}
-                  >
-                    {he.viewAllow}
-                  </button>
-                  <button
-                    type="button"
-                    className="tiny deny"
-                    onClick={async () => {
-                      if (!confirm(he.delete + '?')) return
-                      await api.deleteGroup(g.id)
-                      refreshMeta()
-                    }}
-                  >
-                    {he.delete}
-                  </button>
-                </div>
-              </div>
-              {selectedGroup?.id === g.id && (
-                <div style={{ marginTop: '1rem', borderTop: '1px solid var(--line)', paddingTop: '0.85rem' }}>
-                  <label>{he.rename}</label>
-                  <div className="row">
-                    <input value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} />
-                    <button
-                      type="button"
-                      className="tiny approve"
-                      onClick={async () => {
-                        await api.updateGroup(g.id, renameDraft.trim(), g.description)
-                        flash(he.ok)
-                        refreshMeta()
-                      }}
-                    >
-                      {he.save}
-                    </button>
-                  </div>
-                  <label>{he.members}</label>
-                  <input
-                    value={memberFilter}
-                    onChange={(e) => setMemberFilter(e.target.value)}
-                    placeholder={he.filterDevices}
-                  />
-                  <div className="members">
-                    {filteredDevices.map((d) => (
-                      <label key={d.enrollment_id}>
-                        <input
-                          type="checkbox"
-                          checked={members.includes(d.enrollment_id)}
-                          onChange={(e) =>
-                            setMembers((m) =>
-                              e.target.checked
-                                ? [...m, d.enrollment_id]
-                                : m.filter((x) => x !== d.enrollment_id),
-                            )
-                          }
+        <Tabs
+          activeKey={tab}
+          onChange={(k) => void setTab(k as TabKey)}
+          items={[
+            {
+              key: 'requests',
+              label: (
+                <Badge count={pendingCount} size="small" offset={[8, 0]}>
+                  {he.tabRequests}
+                </Badge>
+              ),
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Card size="small">
+                    <Flex wrap="wrap" gap={12}>
+                      <div style={{ minWidth: 140, flex: 1 }}>
+                        <Typography.Text type="secondary">{he.status}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={reqFilters.status}
+                          onChange={(v) => void setReqFilters({ status: v })}
+                          options={[
+                            { value: 'pending', label: he.pending },
+                            { value: 'all', label: he.all },
+                            { value: 'open', label: he.open },
+                            { value: 'closed', label: he.closed },
+                            { value: 'approved', label: he.approved },
+                            { value: 'denied', label: he.denied },
+                            { value: 'resolved', label: he.resolved },
+                          ]}
                         />
-                        <span>{labelDevice(d, devices)}</span>
-                      </label>
-                    ))}
-                  </div>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="tiny approve"
-                      onClick={async () => {
-                        setMembers(await api.setMembers(g.id, members))
-                        flash(he.ok)
-                        refreshMeta()
-                      }}
-                    >
-                      {he.saveMembers}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </>
-      )}
+                      </div>
+                      <div style={{ minWidth: 140, flex: 1 }}>
+                        <Typography.Text type="secondary">{he.type}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={reqFilters.type}
+                          onChange={(v) => void setReqFilters({ type: v })}
+                          options={[
+                            { value: 'all', label: he.all },
+                            { value: 'access', label: he.typeLabel.access },
+                            { value: 'general', label: he.typeLabel.general },
+                            { value: 'bug', label: he.typeLabel.bug },
+                          ]}
+                        />
+                      </div>
+                      <div style={{ minWidth: 160, flex: 1 }}>
+                        <Typography.Text type="secondary">{he.device}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={reqFilters.device || undefined}
+                          allowClear
+                          placeholder={he.all}
+                          onChange={(v) => void setReqFilters({ device: v || '' })}
+                          options={devices.map((d) => ({
+                            value: d.enrollment_id,
+                            label: labelDevice(d, devices),
+                          }))}
+                        />
+                      </div>
+                      <div style={{ minWidth: 200, flex: 2 }}>
+                        <Typography.Text type="secondary">{he.search}</Typography.Text>
+                        <Input
+                          style={{ marginTop: 4 }}
+                          value={reqFilters.q}
+                          onChange={(e) => void setReqFilters({ q: e.target.value })}
+                          placeholder={he.searchPlaceholder}
+                          allowClear
+                        />
+                      </div>
+                    </Flex>
+                  </Card>
 
-      {tab === 'allowances' && (
-        <>
-          <div className="panel filters">
-            <div className="filters-row">
-              <div>
-                <label>{he.scope}</label>
-                <select
-                  value={allowScope}
-                  onChange={(e) => {
-                    setAllowScope(e.target.value)
-                    if (e.target.value === 'device' && !allowDevice && devices[0]) setAllowDevice(devices[0].enrollment_id)
-                    if (e.target.value === 'group' && !allowGroup && groups[0]) setAllowGroup(groups[0].id)
-                  }}
-                >
-                  <option value="global">{he.global}</option>
-                  <option value="group">{he.group}</option>
-                  <option value="device">{he.deviceEffective}</option>
-                  <option value="all">{he.allSources}</option>
-                </select>
-              </div>
-              <div>
-                <label>{he.kind}</label>
-                <select value={allowKind} onChange={(e) => setAllowKind(e.target.value)}>
-                  <option value="all">{he.appsAndUrls}</option>
-                  <option value="app">{he.appsOnly}</option>
-                  <option value="url">{he.urlsOnly}</option>
-                </select>
-              </div>
-              {allowScope === 'group' && (
-                <div>
-                  <label>{he.group}</label>
-                  <select value={allowGroup} onChange={(e) => setAllowGroup(e.target.value)}>
-                    {groups.map((g) => (
-                      <option key={g.id} value={g.id}>{g.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {allowScope === 'device' && (
-                <div>
-                  <label>{he.device}</label>
-                  <select value={allowDevice} onChange={(e) => setAllowDevice(e.target.value)}>
-                    {devices.map((d) => (
-                      <option key={d.enrollment_id} value={d.enrollment_id}>{labelDevice(d, devices)}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-            <input value={allowQ} onChange={(e) => setAllowQ(e.target.value)} placeholder={he.searchPlaceholder} />
-          </div>
+                  {requestsLoading && <LoadingBlock />}
+                  {!requestsLoading && !requests.length && (
+                    <Empty description={he.emptyRequests} />
+                  )}
+                  {!!requests.length && (
+                    <Spin spinning={requestsFetching && !requestsLoading}>
+                      <Row gutter={[16, 16]} className="inbox-grid">
+                        <Col xs={24} md={9}>
+                          <Card size="small" title={he.queue} styles={{ body: { padding: 0 } }}>
+                            <div className="inbox-queue">
+                              <List
+                                dataSource={requests}
+                                renderItem={(r) => {
+                                  const next = adminNextAction(
+                                    r.type,
+                                    r.status,
+                                    r.last_message?.author_role,
+                                  )
+                                  const snip = r.last_message?.body || r.reason || ''
+                                  const active = selectedReq?.id === r.id
+                                  return (
+                                    <List.Item
+                                      onClick={() => void setSelectedReqId(r.id)}
+                                      style={{
+                                        cursor: 'pointer',
+                                        paddingInline: 12,
+                                        background: active ? '#eef7f2' : undefined,
+                                      }}
+                                    >
+                                      <List.Item.Meta
+                                        avatar={
+                                          r.type === 'access' && r.kind === 'app' ? (
+                                            <AppThumb
+                                              name={r.app?.app_name || r.value}
+                                              url={r.app?.artwork_url}
+                                              size={36}
+                                            />
+                                          ) : undefined
+                                        }
+                                        title={
+                                          <Flex justify="space-between" gap={8} align="center">
+                                            <Typography.Text ellipsis style={{ maxWidth: 160 }}>
+                                              {r.app?.app_name || r.value}
+                                            </Typography.Text>
+                                            <Tag color={nextTagColor(next.kind, r.status)}>
+                                              {next.label}
+                                            </Tag>
+                                          </Flex>
+                                        }
+                                        description={
+                                          <>
+                                            <div>
+                                              {labelDevice(r.enrollment_id, devices)} ·{' '}
+                                              {he.typeLabel[r.type] || r.type}
+                                            </div>
+                                            {snip && <div className="inbox-snip">{snip}</div>}
+                                          </>
+                                        }
+                                      />
+                                    </List.Item>
+                                  )
+                                }}
+                              />
+                            </div>
+                          </Card>
+                        </Col>
+                        <Col xs={24} md={15}>
+                          <Card size="small" title={he.ticket}>
+                            {!selectedReq && <Empty description={he.pickRequest} />}
+                            {selectedReq && (() => {
+                              const r = selectedReq
+                              const scope = approveScope[r.id] || 'device'
+                              const sub = deviceSub(r.enrollment_id, devices)
+                              const next = adminNextAction(
+                                r.type,
+                                r.status,
+                                r.last_message?.author_role,
+                              )
+                              return (
+                                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                                  <Flex justify="space-between" gap={12} align="start">
+                                    <Flex gap={10} align="center">
+                                      {r.type === 'access' && r.kind === 'app' && (
+                                        <AppThumb
+                                          name={r.app?.app_name || r.value}
+                                          url={r.app?.artwork_url}
+                                          size={40}
+                                        />
+                                      )}
+                                      <div>
+                                        <Typography.Text strong>
+                                          {r.app?.app_name || r.value}
+                                        </Typography.Text>
+                                        <div>
+                                          <Typography.Text type="secondary">
+                                            {labelDevice(r.enrollment_id, devices)}
+                                            {sub && ` · ${sub}`}
+                                            {' · '}
+                                            {he.typeLabel[r.type] || r.type}
+                                          </Typography.Text>
+                                        </div>
+                                      </div>
+                                    </Flex>
+                                    <Tag color={nextTagColor(next.kind, r.status)}>{next.label}</Tag>
+                                  </Flex>
 
-          <div className="panel" style={{ marginBottom: '1rem' }}>
-            <strong>{he.addAllow}</strong>
-            <div className="filters-row">
-              <div>
-                <label>{he.kind}</label>
-                <select value={addKind} onChange={(e) => { setAddKind(e.target.value); setAddApp(null); setAddValue('') }}>
-                  <option value="url">אתר</option>
-                  <option value="app">אפליקציה</option>
-                </select>
-              </div>
-              <div>
-                <label>{he.scope}</label>
-                <select value={addScope} onChange={(e) => setAddScope(e.target.value)}>
-                  <option value="global">{he.everyone}</option>
-                  <option value="group">{he.group}</option>
-                  <option value="device">{he.device}</option>
-                </select>
-              </div>
-              <div>
-                <label>{he.duration}</label>
-                <select value={addDuration} onChange={(e) => setAddDuration(e.target.value)}>
-                  <option value="permanent">{he.permanent}</option>
-                  <option value="1h">{he.hour}</option>
-                  <option value="24h">{he.day}</option>
-                  <option value="15m">{he.minutes15}</option>
-                  <option value="today">{he.today}</option>
-                </select>
-              </div>
-            </div>
-            {addScope === 'group' && (
-              <select value={addGroup} onChange={(e) => setAddGroup(e.target.value)}>
-                <option value="">…</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-              </select>
-            )}
-            {addScope === 'device' && (
-              <select value={addDevice} onChange={(e) => setAddDevice(e.target.value)}>
-                <option value="">…</option>
-                {devices.map((d) => (
-                  <option key={d.enrollment_id} value={d.enrollment_id}>{labelDevice(d, devices)}</option>
-                ))}
-              </select>
-            )}
-            {addKind === 'url' ? (
-              <input value={addValue} onChange={(e) => setAddValue(e.target.value)} placeholder="khanacademy.org" />
-            ) : (
-              <>
-                <div className="row">
-                  <input value={addAppQ} onChange={(e) => setAddAppQ(e.target.value)} />
-                  <button type="button" className="tiny secondary" onClick={async () => setAddResults(await api.searchApps(addAppQ.trim()))}>
-                    {he.search}
-                  </button>
-                </div>
-                <div className="results">
-                  {addResults.map((app) => (
-                    <button key={app.bundle_id} type="button" className="app-row" onClick={() => { setAddApp(app); setAddValue(app.bundle_id); setAddResults([]) }}>
-                      <img src={app.artwork_url || ''} alt="" />
-                      <div><strong>{app.app_name}</strong><span>{app.bundle_id}</span></div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-            <button
-              type="button"
-              className="approve"
-              style={{ width: '100%' }}
-              onClick={async () => {
-                try {
-                  await api.createAllowance({
-                    kind: addKind,
-                    value: addKind === 'app' ? addApp?.bundle_id || addValue : addValue,
-                    scope: addScope,
-                    duration: addDuration,
-                    group_id: addGroup,
-                    enrollment_id: addDevice,
-                  })
-                  flash(he.ok)
-                  setAddValue('')
-                  setAddApp(null)
-                  loadAllowances()
-                } catch (e) {
-                  flash((e as Error).message, true)
-                }
-              }}
-            >
-              {he.addToAllow}
-            </button>
-          </div>
+                                  <RequestThread
+                                    requestId={r.id}
+                                    role="admin"
+                                    closed={r.status !== 'pending'}
+                                    onPosted={() => {
+                                      void qc.invalidateQueries({ queryKey: ['requests'] })
+                                      void refreshMeta()
+                                    }}
+                                  />
 
-          {!allowances.length && !busy && <div className="panel">{he.emptyAllow}</div>}
-          {allowances.map((row, i) => (
-            <div className="card" key={`${row.kind}-${row.value}-${row.source}-${i}`}>
-              <span className="badge">{row.kind === 'app' ? 'אפליקציה' : 'אתר'}</span>
-              <span className="badge">{sourceLabel(row.source)}</span>
-              <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                {row.kind === 'app' && row.app?.artwork_url ? (
-                  <img
-                    src={row.app.artwork_url}
-                    alt=""
-                    width={44}
-                    height={44}
-                    style={{ borderRadius: 10, objectFit: 'cover', background: '#eee', flexShrink: 0 }}
-                  />
-                ) : row.kind === 'app' ? (
-                  <div
-                    aria-hidden
-                    style={{
-                      width: 44,
-                      height: 44,
-                      borderRadius: 10,
-                      background: '#e8eef2',
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontWeight: 700,
-                      color: 'var(--muted)',
-                      flexShrink: 0,
-                    }}
+                                  {r.status === 'pending' && r.type === 'access' && (
+                                    <Flex wrap="wrap" gap={8}>
+                                      <Select
+                                        style={{ minWidth: 140 }}
+                                        value={scope}
+                                        onChange={(v) =>
+                                          setApproveScope((s) => ({ ...s, [r.id]: v }))
+                                        }
+                                        options={[
+                                          { value: 'device', label: he.thisDevice },
+                                          { value: 'group', label: he.aGroup },
+                                          { value: 'global', label: he.everyone },
+                                        ]}
+                                      />
+                                      {scope === 'group' && (
+                                        <Select
+                                          style={{ minWidth: 140 }}
+                                          placeholder="קבוצה…"
+                                          value={
+                                            approveGroup[r.id] ||
+                                            (groups.length === 1 ? groups[0].id : undefined)
+                                          }
+                                          onChange={(v) =>
+                                            setApproveGroup((s) => ({ ...s, [r.id]: v }))
+                                          }
+                                          options={groups.map((g) => ({
+                                            value: g.id,
+                                            label: g.name,
+                                          }))}
+                                        />
+                                      )}
+                                      <Button
+                                        type="primary"
+                                        loading={decideMutation.isPending}
+                                        onClick={() =>
+                                          decideMutation.mutate({
+                                            id: r.id,
+                                            approve: true,
+                                            duration: '1h',
+                                          })
+                                        }
+                                      >
+                                        {he.approve1h}
+                                      </Button>
+                                      <Button
+                                        title={he.approveForeverHint}
+                                        loading={decideMutation.isPending}
+                                        onClick={() =>
+                                          decideMutation.mutate({
+                                            id: r.id,
+                                            approve: true,
+                                            duration: 'permanent',
+                                          })
+                                        }
+                                      >
+                                        {he.approveForever}
+                                      </Button>
+                                      <Button
+                                        danger
+                                        loading={decideMutation.isPending}
+                                        onClick={() =>
+                                          decideMutation.mutate({ id: r.id, approve: false })
+                                        }
+                                      >
+                                        {he.deny}
+                                      </Button>
+                                    </Flex>
+                                  )}
+
+                                  {r.status === 'pending' && r.type !== 'access' && (
+                                    <Space>
+                                      <Button
+                                        type="primary"
+                                        loading={decideMutation.isPending}
+                                        onClick={() =>
+                                          decideMutation.mutate({ id: r.id, approve: true })
+                                        }
+                                      >
+                                        {r.type === 'bug' ? he.resolveBug : he.resolveGeneral}
+                                      </Button>
+                                      <Button
+                                        danger
+                                        loading={decideMutation.isPending}
+                                        onClick={() =>
+                                          decideMutation.mutate({ id: r.id, approve: false })
+                                        }
+                                      >
+                                        {he.denyGeneral}
+                                      </Button>
+                                    </Space>
+                                  )}
+                                </Space>
+                              )
+                            })()}
+                          </Card>
+                        </Col>
+                      </Row>
+                    </Spin>
+                  )}
+                </Space>
+              ),
+            },
+            {
+              key: 'groups',
+              label: he.tabGroups,
+              children: metaLoading ? (
+                <LoadingBlock />
+              ) : (
+                <Row gutter={[16, 16]}>
+                  <Col xs={24} md={12}>
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      <Card title={he.createGroup} size="small">
+                        <Space direction="vertical" style={{ width: '100%' }}>
+                          <Input
+                            placeholder={he.groupName}
+                            value={newName}
+                            onChange={(e) => setNewName(e.target.value)}
+                          />
+                          <Input
+                            placeholder={he.groupDesc}
+                            value={newDesc}
+                            onChange={(e) => setNewDesc(e.target.value)}
+                          />
+                          <Button
+                            type="primary"
+                            block
+                            disabled={!newName.trim()}
+                            onClick={async () => {
+                              try {
+                                const g = await api.createGroup(newName.trim(), newDesc.trim())
+                                setNewName('')
+                                setNewDesc('')
+                                message.success(he.ok)
+                                await refreshMeta()
+                                await openGroup(g)
+                              } catch (e) {
+                                message.error((e as Error).message)
+                              }
+                            }}
+                          >
+                            {he.createGroup}
+                          </Button>
+                        </Space>
+                      </Card>
+                      {!groups.length && <Empty description={he.noGroups} />}
+                      {groups.map((g) => (
+                        <Card
+                          key={g.id}
+                          size="small"
+                          style={
+                            selectedGroup?.id === g.id
+                              ? { outline: '2px solid #0b6e4f', outlineOffset: 2 }
+                              : undefined
+                          }
+                        >
+                          <Flex justify="space-between" gap={12} align="start">
+                            <div>
+                              <Typography.Text strong>{g.name}</Typography.Text>{' '}
+                              <Tag>
+                                {g.member_count ?? 0} {he.memberCount}
+                              </Tag>
+                              {g.description && (
+                                <div>
+                                  <Typography.Text type="secondary">{g.description}</Typography.Text>
+                                </div>
+                              )}
+                            </div>
+                            <Space>
+                              <Button size="small" onClick={() => void openGroup(g)}>
+                                {he.openGroup}
+                              </Button>
+                              <Button
+                                size="small"
+                                onClick={() => {
+                                  void setTab('allowances')
+                                  void setAllowFilters({
+                                    ascope: 'group',
+                                    agroup: g.id,
+                                  })
+                                }}
+                              >
+                                {he.viewAllow}
+                              </Button>
+                            </Space>
+                          </Flex>
+                        </Card>
+                      ))}
+                    </Space>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    {!selectedGroup && (
+                      <Empty description="בחרו קבוצה" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                    )}
+                    {selectedGroup && (
+                      <Card
+                        size="small"
+                        title={selectedGroup.name}
+                        extra={
+                          <Button type="link" onClick={() => void setSelectedGroupId(null)}>
+                            {he.close}
+                          </Button>
+                        }
+                      >
+                        <Spin spinning={membersQuery.isFetching}>
+                          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                            {membersQuery.isLoading && !membersQuery.data ? (
+                              <Skeleton active paragraph={{ rows: 4 }} />
+                            ) : (
+                              <>
+                                <div>
+                                  <Typography.Text type="secondary">{he.rename}</Typography.Text>
+                                  <Flex gap={8} style={{ marginTop: 4 }}>
+                                    <Input
+                                      value={renameDraft}
+                                      onChange={(e) => setRenameDraft(e.target.value)}
+                                    />
+                                    <Button
+                                      type="primary"
+                                      onClick={async () => {
+                                        await api.updateGroup(
+                                          selectedGroup.id,
+                                          renameDraft.trim(),
+                                          selectedGroup.description,
+                                        )
+                                        message.success(he.ok)
+                                        void refreshMeta()
+                                      }}
+                                    >
+                                      {he.save}
+                                    </Button>
+                                  </Flex>
+                                </div>
+                                <div>
+                                  <Typography.Text type="secondary">{he.members}</Typography.Text>
+                                  <Input
+                                    style={{ marginTop: 4, marginBottom: 8 }}
+                                    value={memberFilter}
+                                    onChange={(e) => setMemberFilter(e.target.value)}
+                                    placeholder={he.filterDevices}
+                                    allowClear
+                                  />
+                                  <Checkbox.Group
+                                    style={{ width: '100%' }}
+                                    value={members}
+                                    onChange={(vals) => setMembers(vals as string[])}
+                                  >
+                                    <Space direction="vertical">
+                                      {filteredDevices.map((d) => (
+                                        <Checkbox key={d.enrollment_id} value={d.enrollment_id}>
+                                          {labelDevice(d, devices)}
+                                        </Checkbox>
+                                      ))}
+                                    </Space>
+                                  </Checkbox.Group>
+                                  {!devices.length && (
+                                    <Typography.Text type="secondary">
+                                      {he.emptyDevices}
+                                    </Typography.Text>
+                                  )}
+                                </div>
+                                <Space>
+                                  <Button
+                                    type="primary"
+                                    onClick={async () => {
+                                      setMembers(await api.setMembers(selectedGroup.id, members))
+                                      message.success(he.ok)
+                                      void refreshMeta()
+                                      void qc.invalidateQueries({
+                                        queryKey: ['group-members', selectedGroup.id],
+                                      })
+                                    }}
+                                  >
+                                    {he.saveMembers}
+                                  </Button>
+                                  <Button
+                                    danger
+                                    onClick={() => {
+                                      modal.confirm({
+                                        title: he.delete + '?',
+                                        onOk: async () => {
+                                          await api.deleteGroup(selectedGroup.id)
+                                          await setSelectedGroupId(null)
+                                          void refreshMeta()
+                                        },
+                                      })
+                                    }}
+                                  >
+                                    {he.delete}
+                                  </Button>
+                                </Space>
+                              </>
+                            )}
+                          </Space>
+                        </Spin>
+                      </Card>
+                    )}
+                  </Col>
+                </Row>
+              ),
+            },
+            {
+              key: 'allowances',
+              label: he.tabAllow,
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Card size="small">
+                    <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                      <Segmented
+                        block
+                        value={allowFilters.ascope}
+                        onChange={(v) => {
+                          const next = v as (typeof allowScopes)[number]
+                          const patch: Partial<typeof allowFilters> = { ascope: next }
+                          if (next === 'device' && !allowFilters.adevice && devices[0]) {
+                            patch.adevice = devices[0].enrollment_id
+                          }
+                          if (next === 'group' && !allowFilters.agroup && groups[0]) {
+                            patch.agroup = groups[0].id
+                          }
+                          void setAllowFilters(patch)
+                        }}
+                        options={[
+                          { value: 'global', label: he.global },
+                          { value: 'group', label: he.group },
+                          { value: 'device', label: he.deviceEffective },
+                          { value: 'all', label: he.allSources },
+                        ]}
+                      />
+                      <Flex wrap="wrap" gap={12}>
+                        <Select
+                          style={{ minWidth: 140 }}
+                          value={allowFilters.akind}
+                          onChange={(v) => void setAllowFilters({ akind: v })}
+                          options={[
+                            { value: 'all', label: he.appsAndUrls },
+                            { value: 'app', label: he.appsOnly },
+                            { value: 'url', label: he.urlsOnly },
+                          ]}
+                        />
+                        {allowFilters.ascope === 'group' && (
+                          <Select
+                            style={{ minWidth: 160 }}
+                            value={allowFilters.agroup || undefined}
+                            onChange={(v) => void setAllowFilters({ agroup: v })}
+                            options={groups.map((g) => ({ value: g.id, label: g.name }))}
+                          />
+                        )}
+                        {allowFilters.ascope === 'device' && (
+                          <Select
+                            style={{ minWidth: 160 }}
+                            value={allowFilters.adevice || undefined}
+                            onChange={(v) => void setAllowFilters({ adevice: v })}
+                            options={devices.map((d) => ({
+                              value: d.enrollment_id,
+                              label: labelDevice(d, devices),
+                            }))}
+                          />
+                        )}
+                        <Input
+                          style={{ flex: 1, minWidth: 180 }}
+                          value={allowFilters.aq}
+                          onChange={(e) => void setAllowFilters({ aq: e.target.value })}
+                          placeholder={he.searchPlaceholder}
+                          allowClear
+                        />
+                        <Button type="primary" onClick={() => setAddOpen(true)}>
+                          {he.addAllow}
+                        </Button>
+                      </Flex>
+                    </Space>
+                  </Card>
+
+                  {allowancesLoading && <LoadingBlock />}
+                  {!allowancesLoading && !allowances.length && (
+                    <Empty description={he.emptyAllow} />
+                  )}
+                  <Spin spinning={allowancesFetching && !allowancesLoading}>
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      {allowances.map((row, i) => (
+                        <Card key={`${row.kind}-${row.value}-${row.source}-${i}`} size="small">
+                          <Flex gap={12} align="start" justify="space-between">
+                            <Flex gap={12} align="start" style={{ minWidth: 0, flex: 1 }}>
+                              {row.kind === 'app' && (
+                                <AppThumb
+                                  name={row.app?.app_name || row.value}
+                                  url={row.app?.artwork_url}
+                                />
+                              )}
+                              <div style={{ minWidth: 0 }}>
+                                <Space size={4} wrap>
+                                  <Tag>{row.kind === 'app' ? 'אפליקציה' : 'אתר'}</Tag>
+                                  <Tag>{sourceLabel(row.source)}</Tag>
+                                </Space>
+                                <div>
+                                  <Typography.Text strong>
+                                    {row.app?.app_name || row.value}
+                                  </Typography.Text>
+                                </div>
+                                <Typography.Text type="secondary">
+                                  {whyLine(row, groups, devices)}
+                                </Typography.Text>
+                                <div>
+                                  <Typography.Text code copyable>
+                                    {row.value}
+                                  </Typography.Text>
+                                </div>
+                              </div>
+                            </Flex>
+                            {row.source === 'essential' ? (
+                              <Typography.Text type="secondary">{he.essentialNote}</Typography.Text>
+                            ) : (
+                              <Button
+                                danger
+                                size="small"
+                                onClick={() => {
+                                  modal.confirm({
+                                    title: he.revokeConfirm,
+                                    content: row.app?.app_name || row.value,
+                                    onOk: async () => {
+                                      try {
+                                        await api.deleteAllowance(row)
+                                        message.success(he.ok)
+                                        void qc.invalidateQueries({ queryKey: ['allowances'] })
+                                      } catch (e) {
+                                        message.error((e as Error).message)
+                                      }
+                                    },
+                                  })
+                                }}
+                              >
+                                {he.revoke}
+                              </Button>
+                            )}
+                          </Flex>
+                        </Card>
+                      ))}
+                    </Space>
+                  </Spin>
+
+                  <Drawer
+                    open={addOpen}
+                    title={he.addAllow}
+                    onClose={() => setAddOpen(false)}
+                    width={400}
                   >
-                    {(row.app?.app_name || row.value || '?').slice(0, 1).toUpperCase()}
-                  </div>
-                ) : null}
-                <div>
-                  <strong>{row.app?.app_name || row.value}</strong>
-                  <div className="meta"><code>{row.value}</code></div>
-                </div>
-              </div>
-              {row.enrollment_id && <div className="meta">{he.device}: {labelDevice(row.enrollment_id, devices)}</div>}
-              {row.group_id && <div className="meta">{he.group}: {groups.find((g) => g.id === row.group_id)?.name || row.group_id}</div>}
-              {row.source !== 'essential' && (
-                <button
-                  type="button"
-                  className="tiny deny"
-                  onClick={async () => {
-                    try {
-                      await api.deleteAllowance(row)
-                      flash(he.ok)
-                      loadAllowances()
-                    } catch (e) {
-                      flash((e as Error).message, true)
-                    }
-                  }}
-                >
-                  {he.revoke}
-                </button>
-              )}
-            </div>
-          ))}
-        </>
-      )}
-    </main>
+                    <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                      <div>
+                        <Typography.Text type="secondary">{he.kind}</Typography.Text>
+                        <Segmented
+                          block
+                          style={{ marginTop: 4 }}
+                          value={addKind}
+                          onChange={(v) => {
+                            setAddKind(String(v))
+                            setAddApp(null)
+                            setAddValue('')
+                          }}
+                          options={[
+                            { value: 'url', label: 'אתר' },
+                            { value: 'app', label: 'אפליקציה' },
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.scope}</Typography.Text>
+                        <Segmented
+                          block
+                          style={{ marginTop: 4 }}
+                          value={addScope}
+                          onChange={(v) => setAddScope(String(v))}
+                          options={[
+                            { value: 'global', label: he.everyone },
+                            { value: 'group', label: he.group },
+                            { value: 'device', label: he.device },
+                          ]}
+                        />
+                      </div>
+                      {addScope === 'group' && (
+                        <Select
+                          style={{ width: '100%' }}
+                          placeholder="…"
+                          value={addGroup || undefined}
+                          onChange={setAddGroup}
+                          options={groups.map((g) => ({ value: g.id, label: g.name }))}
+                        />
+                      )}
+                      {addScope === 'device' && (
+                        <Select
+                          style={{ width: '100%' }}
+                          placeholder="…"
+                          value={addDevice || undefined}
+                          onChange={setAddDevice}
+                          options={devices.map((d) => ({
+                            value: d.enrollment_id,
+                            label: labelDevice(d, devices),
+                          }))}
+                        />
+                      )}
+                      <div>
+                        <Typography.Text type="secondary">{he.duration}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={addDuration}
+                          onChange={setAddDuration}
+                          options={[
+                            { value: 'permanent', label: he.permanent },
+                            { value: '1h', label: he.hour },
+                            { value: '24h', label: he.day },
+                            { value: '15m', label: he.minutes15 },
+                            { value: 'today', label: he.today },
+                          ]}
+                        />
+                      </div>
+                      {addKind === 'url' ? (
+                        <Input
+                          value={addValue}
+                          onChange={(e) => setAddValue(e.target.value)}
+                          placeholder="khanacademy.org"
+                        />
+                      ) : (
+                        <>
+                          <Input
+                            value={addAppQ}
+                            onChange={(e) => setAddAppQ(e.target.value)}
+                            placeholder="YouTube"
+                            allowClear
+                          />
+                          {addAppsQuery.isFetching && (
+                            <Typography.Text type="secondary">{he.searching}</Typography.Text>
+                          )}
+                          <List
+                            size="small"
+                            dataSource={addResults}
+                            renderItem={(app) => (
+                              <List.Item
+                                actions={[
+                                  <Button
+                                    key="pick"
+                                    type="link"
+                                    onClick={() => {
+                                      setAddApp(app)
+                                      setAddValue(app.bundle_id)
+                                    }}
+                                  >
+                                    {he.pick}
+                                  </Button>,
+                                ]}
+                              >
+                                <List.Item.Meta
+                                  avatar={<AppThumb name={app.app_name} url={app.artwork_url} />}
+                                  title={app.app_name}
+                                  description={app.bundle_id}
+                                />
+                              </List.Item>
+                            )}
+                          />
+                          {addApp && (
+                            <Typography.Text type="secondary">
+                              {addApp.app_name} ·{' '}
+                              <Typography.Text code>{addApp.bundle_id}</Typography.Text>
+                            </Typography.Text>
+                          )}
+                        </>
+                      )}
+                      <Button
+                        type="primary"
+                        block
+                        onClick={async () => {
+                          try {
+                            await api.createAllowance({
+                              kind: addKind,
+                              value: addKind === 'app' ? addApp?.bundle_id || addValue : addValue,
+                              scope: addScope,
+                              duration: addDuration,
+                              group_id: addGroup,
+                              enrollment_id: addDevice,
+                            })
+                            message.success(he.ok)
+                            setAddValue('')
+                            setAddApp(null)
+                            setAddOpen(false)
+                            void qc.invalidateQueries({ queryKey: ['allowances'] })
+                          } catch (e) {
+                            message.error((e as Error).message)
+                          }
+                        }}
+                      >
+                        {he.addToAllow}
+                      </Button>
+                    </Space>
+                  </Drawer>
+                </Space>
+              ),
+            },
+            {
+              key: 'devices',
+              label: he.tabDevices,
+              children: metaLoading ? (
+                <LoadingBlock />
+              ) : (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Card size="small">
+                    <Typography.Text strong>{he.nickname}</Typography.Text>
+                    <div>
+                      <Typography.Text type="secondary">{he.nicknameHint}</Typography.Text>
+                    </div>
+                  </Card>
+                  {!devices.length && <Empty description={he.emptyDevices} />}
+                  {devices.map((d) => (
+                    <Card key={d.enrollment_id} size="small">
+                      <Typography.Text type="secondary">{he.nickname}</Typography.Text>
+                      <Input
+                        style={{ marginTop: 4 }}
+                        defaultValue={d.name}
+                        placeholder={d.enrollment_id}
+                        onBlur={async (e) => {
+                          const name = e.target.value.trim()
+                          if (name === d.name) return
+                          try {
+                            await api.setDeviceName(d.enrollment_id, name)
+                            message.success(he.ok)
+                            void refreshMeta()
+                          } catch (err) {
+                            message.error((err as Error).message)
+                          }
+                        }}
+                      />
+                      <Typography.Text code style={{ marginTop: 8, display: 'block' }}>
+                        {d.enrollment_id}
+                      </Typography.Text>
+                    </Card>
+                  ))}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Space>
+    </div>
   )
 }

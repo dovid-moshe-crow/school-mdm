@@ -61,7 +61,11 @@ func New(ctx context.Context) (*App, error) {
 		Enqueue:   stub,
 		PortalURL: cfg.PortalBaseURL,
 	}
-	catalog := &appmeta.Catalog{Store: st}
+	catalog := &appmeta.Catalog{
+		Store:   st,
+		Country: cfg.ItunesCountry,
+		Lang:    cfg.ItunesLang,
+	}
 
 	return &App{
 		Cfg:     cfg,

@@ -1,35 +1,211 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
-import { api, type AccessStatus, type AppMeta, type Request } from '../api'
-import { he } from '../he'
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Collapse,
+  Empty,
+  Flex,
+  Input,
+  List,
+  Rate,
+  Segmented,
+  Skeleton,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  parseAsBoolean,
+  parseAsString,
+  parseAsStringLiteral,
+  useQueryState,
+  useQueryStates,
+} from 'nuqs'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useParams } from 'react-router-dom'
+import { api, type AccessStatus, type AppMeta } from '../api'
+import { RequestThread } from '../components/RequestThread'
+import { he, studentNextAction } from '../he'
+import { AppThumb, normalizeHostPreview, useDebounced } from '../ui'
 
-type Category = 'access-url' | 'access-app' | 'general' | 'bug'
+const categories = ['access-url', 'access-app', 'general', 'bug'] as const
+type Category = (typeof categories)[number]
 
-function statusBadge(s?: AccessStatus) {
-  if (s === 'allowed') return <span className="badge ok">{he.alreadyAllowed}</span>
-  if (s === 'pending') return <span className="badge warn">{he.pendingRequest}</span>
-  if (s === 'denied') return <span className="badge bad">{he.deniedBefore}</span>
+const DESC_PREVIEW = 280
+
+function statusTag(s?: AccessStatus) {
+  if (s === 'allowed') return <Tag color="success">{he.alreadyAllowed}</Tag>
+  if (s === 'pending') return <Tag color="warning">{he.pendingRequest}</Tag>
+  if (s === 'denied') return <Tag color="error">{he.deniedBefore}</Tag>
   return null
 }
 
+function nextTagColor(kind: string, status: string) {
+  if (kind === 'act') return 'processing'
+  if (kind === 'wait') return 'warning'
+  if (kind === 'done' && status === 'denied') return 'error'
+  return 'success'
+}
+
+function fmtTime(v?: string) {
+  if (!v) return ''
+  try {
+    return new Date(v).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return v
+  }
+}
+
+function fmtSize(bytes?: number) {
+  if (!bytes || bytes <= 0) return ''
+  const mb = bytes / (1024 * 1024)
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
+  return `${mb.toFixed(1)} MB`
+}
+
+function AppDetailsPanel({
+  app,
+  loading,
+}: {
+  app: AppMeta
+  loading: boolean
+}) {
+  const [descOpen, setDescOpen] = useState(false)
+  const desc = app.description?.trim() || ''
+  const longDesc = desc.length > DESC_PREVIEW
+  const shownDesc = !longDesc || descOpen ? desc : `${desc.slice(0, DESC_PREVIEW).trimEnd()}…`
+
+  return (
+    <div className="app-details">
+      {loading && (
+        <Typography.Text type="secondary" className="app-details-loading">
+          {he.loadingDetails}
+        </Typography.Text>
+      )}
+
+      <Flex gap={16} align="start" className="app-details-hero">
+        <AppThumb name={app.app_name} url={app.artwork_url} size={88} />
+        <div className="app-details-hero-text">
+          <Typography.Title level={4} style={{ margin: 0 }}>
+            {app.app_name}
+          </Typography.Title>
+          {app.developer && (
+            <Typography.Text type="secondary">
+              {he.by} {app.developer}
+            </Typography.Text>
+          )}
+          {!!app.average_rating && (
+            <Flex gap={8} align="center" style={{ marginTop: 6 }}>
+              <Rate disabled allowHalf value={app.average_rating} style={{ fontSize: 14 }} />
+              <Typography.Text type="secondary">
+                {app.average_rating.toFixed(1)}
+                {app.rating_count
+                  ? ` · ${app.rating_count.toLocaleString('he-IL')} דירוגים`
+                  : ''}
+              </Typography.Text>
+            </Flex>
+          )}
+          <div className="app-chip-row">
+            {app.genre && <Tag className="app-chip">{app.genre}</Tag>}
+            {app.formatted_price && <Tag className="app-chip">{app.formatted_price}</Tag>}
+            {app.content_rating && <Tag className="app-chip">{app.content_rating}</Tag>}
+            {!!app.file_size_bytes && <Tag className="app-chip">{fmtSize(app.file_size_bytes)}</Tag>}
+            {app.version && <Tag className="app-chip">{he.version} {app.version}</Tag>}
+          </div>
+        </div>
+      </Flex>
+
+      {desc && (
+        <div className="app-details-section">
+          <Typography.Text strong>{he.description}</Typography.Text>
+          <p className="app-description">{shownDesc}</p>
+          {longDesc && (
+            <Button type="link" onClick={() => setDescOpen((v) => !v)} style={{ paddingInline: 0 }}>
+              {descOpen ? he.showLess : he.showMore}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {!!app.screenshots?.length && (
+        <div className="app-details-section">
+          <Typography.Text strong>{he.screenshots}</Typography.Text>
+          <div className="screenshot-row">
+            {app.screenshots.map((src) => (
+              <img key={src} src={src} alt="" loading="lazy" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {app.store_url && (
+        <Button type="link" href={app.store_url} target="_blank" rel="noreferrer" style={{ paddingInline: 0 }}>
+          {he.appStoreLink}
+        </Button>
+      )}
+
+      <Collapse
+        ghost
+        size="small"
+        items={[
+          {
+            key: 'advanced',
+            label: <Typography.Text type="secondary">{he.advancedInfo}</Typography.Text>,
+            children: (
+              <Space direction="vertical" size={4}>
+                <Typography.Text type="secondary">
+                  {he.bundleId}: <Typography.Text code copyable>{app.bundle_id}</Typography.Text>
+                </Typography.Text>
+                {app.seller_name && (
+                  <Typography.Text type="secondary">
+                    {he.seller}: {app.seller_name}
+                  </Typography.Text>
+                )}
+                {app.release_date && (
+                  <Typography.Text type="secondary">
+                    {he.released}: {fmtTime(app.release_date)}
+                  </Typography.Text>
+                )}
+              </Space>
+            ),
+          },
+        ]}
+      />
+    </div>
+  )
+}
+
 export default function Portal() {
+  const { message } = App.useApp()
   const { deviceId = '' } = useParams()
-  const [params] = useSearchParams()
-  const [category, setCategory] = useState<Category>(params.get('url') ? 'access-url' : 'access-app')
-  const [url, setUrl] = useState(params.get('url') || '')
+  const qc = useQueryClient()
+  const historyRef = useRef<HTMLDivElement>(null)
+
+  const [params, setParams] = useQueryStates({
+    cat: parseAsStringLiteral(categories),
+    url: parseAsString.withDefault(''),
+    q: parseAsString.withDefault(''),
+    bundle: parseAsString,
+    details: parseAsBoolean.withDefault(true),
+  })
+  const [highlight, setHighlight] = useQueryState('highlight', parseAsString)
+
+  // Default category: access-url when ?url= is present (legacy deep-link), else access-app.
+  const category: Category = params.cat ?? (params.url ? 'access-url' : 'access-app')
+  const url = params.url
+  const query = params.q
+  const bundleId = params.bundle
+  const detailsOpen = params.details
+
   const [subject, setSubject] = useState('')
   const [reason, setReason] = useState('')
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<AppMeta[]>([])
-  const [selected, setSelected] = useState<AppMeta | null>(null)
-  const [searching, setSearching] = useState(false)
-  const [searched, setSearched] = useState(false)
-  const [urlStatus, setUrlStatus] = useState<AccessStatus | null>(null)
-  const [checking, setChecking] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [msg, setMsg] = useState('')
-  const [msgOk, setMsgOk] = useState(true)
-  const [mine, setMine] = useState<Request[]>([])
+  const [selectedCache, setSelectedCache] = useState<AppMeta | null>(null)
+  const debouncedQ = useDebounced(query, 150)
+  const debouncedUrl = useDebounced(url, 350)
 
   const reasonLabel = useMemo(() => {
     if (category === 'access-url') return he.reasonUrl
@@ -38,47 +214,59 @@ export default function Portal() {
     return he.reasonGeneral
   }, [category])
 
-  const loadMine = useCallback(() => {
-    if (!deviceId) return
-    api.myRequests(deviceId).then(setMine).catch(() => setMine([]))
-  }, [deviceId])
+  const urlPreview = useMemo(() => normalizeHostPreview(url), [url])
 
-  useEffect(() => { loadMine() }, [loadMine])
+  const mineQuery = useQuery({
+    queryKey: ['my-requests', deviceId],
+    queryFn: () => api.myRequests(deviceId),
+    enabled: !!deviceId,
+    refetchInterval: 10_000,
+  })
+  const mine = mineQuery.data ?? []
+
+  const urlStatusQuery = useQuery({
+    queryKey: ['access-status', deviceId, 'url', debouncedUrl],
+    queryFn: () => api.accessStatus(deviceId, 'url', debouncedUrl.trim()),
+    enabled: category === 'access-url' && !!debouncedUrl.trim() && !!deviceId,
+  })
+  const urlStatus = urlStatusQuery.data?.status ?? null
+  const checking = urlStatusQuery.isFetching
+
+  const searchQuery = useQuery({
+    queryKey: ['app-search', deviceId, debouncedQ],
+    queryFn: () => api.searchApps(debouncedQ.trim(), deviceId),
+    enabled: category === 'access-app' && !bundleId && !!debouncedQ.trim(),
+    placeholderData: keepPreviousData,
+  })
+  const results = searchQuery.data ?? []
+  const searching = searchQuery.isFetching
+  const searched = searchQuery.isFetched && !!debouncedQ.trim()
+
+  const detailsQuery = useQuery({
+    queryKey: ['app-lookup', bundleId, deviceId],
+    queryFn: () =>
+      api.lookupApp(bundleId!, { refresh: true, enrollmentID: deviceId }),
+    enabled: category === 'access-app' && !!bundleId && !!deviceId,
+  })
 
   useEffect(() => {
-    if (category !== 'access-url' || !url.trim() || !deviceId) {
-      setUrlStatus(null)
-      return
-    }
-    const t = setTimeout(() => {
-      setChecking(true)
-      api.accessStatus(deviceId, 'url', url.trim())
-        .then((r) => setUrlStatus(r.status))
-        .catch(() => setUrlStatus(null))
-        .finally(() => setChecking(false))
-    }, 350)
-    return () => clearTimeout(t)
-  }, [url, category, deviceId])
+    if (detailsQuery.data) setSelectedCache(detailsQuery.data)
+  }, [detailsQuery.data])
 
-  async function search() {
-    if (!query.trim()) return
-    setSearching(true)
-    setSearched(true)
-    try {
-      setResults(await api.searchApps(query.trim(), deviceId))
-    } catch (e) {
-      setMsg((e as Error).message)
-      setMsgOk(false)
-      setResults([])
-    } finally {
-      setSearching(false)
-    }
-  }
+  useEffect(() => {
+    if (detailsQuery.isError) message.error((detailsQuery.error as Error).message)
+  }, [detailsQuery.isError, detailsQuery.error, message])
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault()
+  const selected: AppMeta | null = useMemo(() => {
+    if (!bundleId) return null
+    if (detailsQuery.data?.bundle_id === bundleId) return detailsQuery.data
+    if (selectedCache?.bundle_id === bundleId) return selectedCache
+    const fromSearch = results.find((r) => r.bundle_id === bundleId)
+    return fromSearch ?? { bundle_id: bundleId, app_name: bundleId, developer: '' }
+  }, [bundleId, detailsQuery.data, selectedCache, results])
+
+  async function submit() {
     setSubmitting(true)
-    setMsg('')
     try {
       const body: Record<string, string> = { enrollment_id: deviceId, reason }
       if (category === 'access-url') {
@@ -91,17 +279,17 @@ export default function Portal() {
       } else {
         Object.assign(body, { type: 'bug', value: subject })
       }
-      await api.createRequest(body)
-      setMsgOk(true)
-      setMsg('הבקשה נשלחה')
+      const created = await api.createRequest(body)
+      message.success(he.sentOk)
       setReason('')
       setSubject('')
-      setSelected(null)
-      setResults([])
-      loadMine()
+      setSelectedCache(null)
+      await setParams({ bundle: null, q: '', details: true })
+      await setHighlight(created.id)
+      await qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
+      requestAnimationFrame(() => historyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     } catch (err) {
-      setMsgOk(false)
-      setMsg((err as Error).message)
+      message.error((err as Error).message)
     } finally {
       setSubmitting(false)
     }
@@ -112,114 +300,252 @@ export default function Portal() {
     (category === 'access-app' && selected?.access_status === 'allowed')
 
   return (
-    <main className="shell">
-      <h1 className="brand">{he.portalTitle}</h1>
-      <p className="lede">{he.portalLead}</p>
-      <div className="chip">{he.device} <code>{deviceId}</code></div>
-
-      <form className="panel" onSubmit={submit}>
-        <label>{he.category}</label>
-        <select
-          value={category}
-          onChange={(e) => {
-            setCategory(e.target.value as Category)
-            setMsg('')
-            setSelected(null)
-            setResults([])
-          }}
-        >
-          <option value="access-url">{he.catUrl}</option>
-          <option value="access-app">{he.catApp}</option>
-          <option value="general">{he.catGeneral}</option>
-          <option value="bug">{he.catBug}</option>
-        </select>
-
-        {category === 'access-url' && (
-          <>
-            <label>{he.url}</label>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://" />
-            {checking && <p className="meta">{he.checkStatus}</p>}
-            {statusBadge(urlStatus || undefined)}
-          </>
-        )}
-
-        {category === 'access-app' && !selected && (
-          <>
-            <label>{he.searchApp}</label>
-            <div className="row">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), search())}
-                placeholder="YouTube"
-                autoComplete="off"
-              />
-              <button type="button" className="secondary tiny" onClick={search} disabled={searching}>
-                {searching ? he.searching : he.search}
-              </button>
-            </div>
-            {searched && !searching && results.length === 0 && <p className="meta">{he.noApps}</p>}
-            <div className="results">
-              {results.map((item) => (
-                <button key={item.bundle_id} type="button" className="app-row" onClick={() => setSelected(item)}>
-                  <img src={item.artwork_url || ''} alt="" />
-                  <div>
-                    <strong>{item.app_name}</strong>
-                    <span>{item.developer ? `${he.by} ${item.developer}` : ''}</span>
-                    {statusBadge(item.access_status)}
-                  </div>
-                  <div className="meta">{he.pick}</div>
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-
-        {category === 'access-app' && selected && (
-          <>
-            <label>{he.selectedApp}</label>
-            <div className="picked">
-              <img src={selected.artwork_url || ''} alt="" />
-              <div>
-                <strong>{selected.app_name}</strong>
-                <div className="meta">{selected.developer ? `${he.by} ${selected.developer}` : ''}</div>
-                <code>{selected.bundle_id}</code>
-                <div>{statusBadge(selected.access_status)}</div>
-              </div>
-              <div className="grow">
-                <button type="button" className="secondary tiny" onClick={() => setSelected(null)}>{he.change}</button>
-              </div>
-            </div>
-          </>
-        )}
-
-        {(category === 'general' || category === 'bug') && (
-          <>
-            <label>{category === 'bug' ? he.bugTitle : he.subject}</label>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} required />
-          </>
-        )}
-
-        <label>{reasonLabel}</label>
-        <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} />
-
-        <button type="submit" disabled={submitting || blocked}>
-          {submitting ? he.sending : he.submit}
-        </button>
-        {blocked && <p className="meta">{he.alreadyAllowed}</p>}
-        {msg && <div className={`msg ${msgOk ? 'ok' : 'err'}`}>{msg}</div>}
-      </form>
-
-      <h2 style={{ marginTop: '2rem', fontSize: '1.15rem' }}>{he.myRequests}</h2>
-      {!mine.length && <p className="meta">{he.noRequests}</p>}
-      {mine.map((r) => (
-        <div className="card" key={r.id}>
-          <span className="badge">{he.statusLabel[r.status] || r.status}</span>
-          <span className="badge">{he.typeLabel[r.type] || r.type}</span>
-          <div style={{ marginTop: '0.5rem' }}><strong>{r.app?.app_name || r.value}</strong></div>
-          <div className="meta">{r.reason}</div>
+    <div className="page-shell">
+      <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        <div>
+          <Typography.Title level={2} style={{ marginBottom: 8 }}>
+            {he.portalTitle}
+          </Typography.Title>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+            {he.portalLead}
+          </Typography.Paragraph>
+          <Tag>
+            {he.device} <Typography.Text code>{deviceId}</Typography.Text>
+          </Tag>
         </div>
-      ))}
-    </main>
+
+        <Card>
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <div>
+              <Typography.Text type="secondary">{he.category}</Typography.Text>
+              <div style={{ marginTop: 8 }}>
+                <Segmented
+                  block
+                  value={category}
+                  onChange={(v) => {
+                    const next = v as Category
+                    void setParams({
+                      cat: next,
+                      bundle: null,
+                      q: '',
+                      details: true,
+                      ...(next !== 'access-url' ? { url: '' } : {}),
+                    })
+                    setSelectedCache(null)
+                  }}
+                  options={[
+                    { value: 'access-url', label: he.catUrl },
+                    { value: 'access-app', label: he.catApp },
+                    { value: 'general', label: he.catGeneral },
+                    { value: 'bug', label: he.catBug },
+                  ]}
+                />
+              </div>
+            </div>
+
+            {category === 'access-url' && (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Typography.Text type="secondary">{he.url}</Typography.Text>
+                <Input
+                  value={url}
+                  onChange={(e) => void setParams({ url: e.target.value })}
+                  placeholder="https://"
+                />
+                {urlPreview && (
+                  <Typography.Text type="secondary">
+                    {he.urlWillSave}: <Typography.Text code>{urlPreview}</Typography.Text>
+                  </Typography.Text>
+                )}
+                {checking && <Typography.Text type="secondary">{he.checkStatus}</Typography.Text>}
+                {statusTag(urlStatus || undefined)}
+                {urlStatus === 'allowed' && (
+                  <Alert type="success" showIcon message={he.alreadyAllowedHint} />
+                )}
+              </Space>
+            )}
+
+            {category === 'access-app' && !bundleId && (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Typography.Text type="secondary">{he.searchApp}</Typography.Text>
+                <Input
+                  value={query}
+                  onChange={(e) => void setParams({ q: e.target.value })}
+                  placeholder="YouTube"
+                  autoComplete="off"
+                  allowClear
+                />
+                {searching && (
+                  <Flex gap={8} align="center">
+                    <Spin size="small" />
+                    <Typography.Text type="secondary">{he.searching}</Typography.Text>
+                  </Flex>
+                )}
+                {searched && !searching && results.length === 0 && (
+                  <Empty description={he.noApps} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )}
+                <List
+                  dataSource={results}
+                  loading={searching && !results.length}
+                  renderItem={(item) => (
+                    <List.Item
+                      actions={[
+                        <Button
+                          key="pick"
+                          type="link"
+                          onClick={() => {
+                            setSelectedCache(item)
+                            void setParams({ bundle: item.bundle_id, details: true })
+                          }}
+                        >
+                          {he.pick}
+                        </Button>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
+                        title={item.app_name}
+                        description={
+                          <Space direction="vertical" size={4}>
+                            {item.developer ? `${he.by} ${item.developer}` : null}
+                            {item.access_status && item.access_status !== 'none'
+                              ? statusTag(item.access_status)
+                              : null}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
+              </Space>
+            )}
+
+            {category === 'access-app' && selected && bundleId && (
+              <div className="app-selected">
+                <Flex gap={12} align="start" justify="space-between" wrap="wrap">
+                  <Flex gap={12} align="center">
+                    <AppThumb name={selected.app_name} url={selected.artwork_url} size={56} />
+                    <div>
+                      <Typography.Text strong>{selected.app_name}</Typography.Text>
+                      <div>
+                        <Typography.Text type="secondary">
+                          {selected.developer ? `${he.by} ${selected.developer}` : ''}
+                        </Typography.Text>
+                      </div>
+                      {statusTag(selected.access_status)}
+                    </div>
+                  </Flex>
+                  <Space>
+                    <Button
+                      type="link"
+                      onClick={() => void setParams({ details: !detailsOpen })}
+                      style={{ paddingInline: 0 }}
+                    >
+                      {detailsOpen ? he.hideDetails : he.showDetails}
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setSelectedCache(null)
+                        void setParams({ bundle: null, details: true })
+                      }}
+                    >
+                      {he.change}
+                    </Button>
+                  </Space>
+                </Flex>
+                {selected.access_status === 'allowed' && (
+                  <Alert
+                    style={{ marginTop: 12 }}
+                    type="success"
+                    showIcon
+                    message={he.alreadyAllowedHint}
+                  />
+                )}
+                {detailsOpen && (
+                  <Spin spinning={detailsQuery.isFetching && !detailsQuery.data}>
+                    <AppDetailsPanel
+                      app={selected}
+                      loading={detailsQuery.isFetching}
+                    />
+                  </Spin>
+                )}
+              </div>
+            )}
+
+            {(category === 'general' || category === 'bug') && (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Typography.Text type="secondary">
+                  {category === 'bug' ? he.bugTitle : he.subject}
+                </Typography.Text>
+                <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
+              </Space>
+            )}
+
+            {!blocked && (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Typography.Text type="secondary">{reasonLabel}</Typography.Text>
+                <Input.TextArea
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  rows={3}
+                />
+                <Button type="primary" block loading={submitting} onClick={submit}>
+                  {he.submit}
+                </Button>
+              </Space>
+            )}
+          </Space>
+        </Card>
+
+        <div ref={historyRef}>
+          <Typography.Title level={4}>{he.myRequests}</Typography.Title>
+          {mineQuery.isLoading && !mine.length && (
+            <Skeleton active paragraph={{ rows: 3 }} />
+          )}
+          {!mineQuery.isLoading && !mine.length && <Empty description={he.noRequests} />}
+          <Spin spinning={mineQuery.isFetching && !!mine.length}>
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              {mine.map((r) => {
+                const next = studentNextAction(r.type, r.status, r.last_message?.author_role)
+                return (
+                  <Card
+                    key={r.id}
+                    size="small"
+                    style={
+                      highlight === r.id
+                        ? { outline: '2px solid #0b6e4f', outlineOffset: 2 }
+                        : undefined
+                    }
+                    title={
+                      <Flex gap={10} align="center">
+                        {r.type === 'access' && r.kind === 'app' && (
+                          <AppThumb name={r.app?.app_name || r.value} url={r.app?.artwork_url} size={32} />
+                        )}
+                        <span>{r.app?.app_name || r.value}</span>
+                      </Flex>
+                    }
+                    extra={
+                      <Tag color={nextTagColor(next.kind, r.status)}>{next.label}</Tag>
+                    }
+                  >
+                    <Typography.Text type="secondary">
+                      {fmtTime(r.created_at)} · {he.typeLabel[r.type] || r.type}
+                    </Typography.Text>
+                    <RequestThread
+                      requestId={r.id}
+                      role="student"
+                      deviceId={deviceId}
+                      closed={r.status !== 'pending'}
+                      onPosted={() => {
+                        void qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
+                      }}
+                    />
+                  </Card>
+                )
+              })}
+            </Space>
+          </Spin>
+        </div>
+      </Space>
+    </div>
   )
 }

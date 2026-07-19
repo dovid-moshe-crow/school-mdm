@@ -3,7 +3,21 @@ export type AppMeta = {
   app_name: string
   developer: string
   artwork_url?: string
+  store_url?: string
+  track_id?: number
+  source?: string
   access_status?: AccessStatus
+  description?: string
+  genre?: string
+  version?: string
+  average_rating?: number
+  rating_count?: number
+  content_rating?: string
+  release_date?: string
+  formatted_price?: string
+  file_size_bytes?: number
+  seller_name?: string
+  screenshots?: string[]
 }
 
 export type AccessStatus = 'allowed' | 'pending' | 'denied' | 'none'
@@ -18,7 +32,18 @@ export type Request = {
   status: string
   duration?: string
   created_at: string
+  decided_at?: string
+  message_count?: number
+  last_message?: RequestMessage
   app?: AppMeta
+}
+
+export type RequestMessage = {
+  id: string
+  request_id: string
+  author_role: 'student' | 'admin'
+  body: string
+  created_at: string
 }
 
 export type Group = {
@@ -26,6 +51,7 @@ export type Group = {
   name: string
   description: string
   created_at: string
+  member_count?: number
 }
 
 export type Device = {
@@ -57,6 +83,15 @@ export const api = {
     if (enrollmentID) p.set('enrollment_id', enrollmentID)
     return fetch(`/api/apps/search?${p}`).then((r) => json<AppMeta[]>(r))
   },
+  lookupApp(bundleID: string, opts?: { refresh?: boolean; enrollmentID?: string }) {
+    const p = new URLSearchParams()
+    if (opts?.refresh) p.set('full', '1')
+    if (opts?.enrollmentID) p.set('enrollment_id', opts.enrollmentID)
+    const q = p.toString()
+    return fetch(`/api/apps/${encodeURIComponent(bundleID)}${q ? `?${q}` : ''}`).then((r) =>
+      json<AppMeta>(r),
+    )
+  },
   accessStatus(enrollmentID: string, kind: string, value: string) {
     const p = new URLSearchParams({ enrollment_id: enrollmentID, kind, value })
     return fetch(`/api/access-status?${p}`).then((r) => json<{ status: AccessStatus }>(r))
@@ -72,6 +107,31 @@ export const api = {
     return fetch(`/api/device/${encodeURIComponent(enrollmentID)}/requests`).then((r) =>
       json<Request[]>(r),
     )
+  },
+  getRequest(id: string) {
+    return fetch(`/api/requests/${id}`).then((r) => json<Request>(r))
+  },
+  messages(id: string, enrollmentID?: string) {
+    const p = new URLSearchParams()
+    if (enrollmentID) p.set('enrollment_id', enrollmentID)
+    const q = p.toString()
+    return fetch(`/api/requests/${id}/messages${q ? `?${q}` : ''}`).then((r) =>
+      json<RequestMessage[]>(r),
+    )
+  },
+  postAdminMessage(id: string, body: string) {
+    return fetch(`/api/requests/${id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    }).then((r) => json<RequestMessage>(r))
+  },
+  postStudentMessage(deviceID: string, id: string, body: string) {
+    return fetch(`/api/device/${encodeURIComponent(deviceID)}/requests/${id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    }).then((r) => json<RequestMessage>(r))
   },
   requests(params: URLSearchParams) {
     return fetch(`/api/requests?${params}`).then((r) => json<Request[]>(r))

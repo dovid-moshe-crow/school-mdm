@@ -3,14 +3,15 @@ export const he = {
   homeLead: 'יש לפתוח את הפורטל ממכשיר מנוהל, או להיכנס לממשק הניהול.',
   openAdmin: 'ממשק ניהול',
   portalTitle: 'בקשת עזרה',
-  portalLead: 'בקשת אפליקציה או אתר, שאלה כללית, או דיווח על תקלה.',
+  portalLead: 'בקשת אפליקציה או אתר, שאלה כללית, או דיווח על תקלה — אפשר גם להמשיך לשוחח עם הניהול.',
   device: 'מכשיר',
   category: 'סוג הבקשה',
-  catUrl: 'גישה לאתר',
-  catApp: 'גישה לאפליקציה',
-  catGeneral: 'בקשה כללית',
-  catBug: 'דיווח תקלה',
+  catUrl: 'אתר',
+  catApp: 'אפליקציה',
+  catGeneral: 'כללי',
+  catBug: 'תקלה',
   url: 'כתובת האתר',
+  urlWillSave: 'יישמר כ',
   searchApp: 'חיפוש ב-App Store',
   search: 'חיפוש',
   searching: 'מחפש…',
@@ -26,85 +27,140 @@ export const he = {
   reasonGeneral: 'פרטים',
   submit: 'שליחה',
   sending: 'שולח…',
-  alreadyAllowed: 'כבר מאושר במכשיר',
-  pendingRequest: 'יש כבר בקשה ממתינה',
+  alreadyAllowed: 'כבר ברשימת המותרים',
+  alreadyAllowedHint: 'כבר מאושר במכשיר — אין צורך לבקש שוב.',
+  pendingRequest: 'בקשה פתוחה',
   deniedBefore: 'נדחה בעבר — אפשר לבקש שוב',
   checkStatus: 'בודק הרשאות…',
   myRequests: 'הבקשות שלי',
-  noRequests: 'אין בקשות עדיין.',
+  noRequests: 'עדיין אין בקשות.',
+  sentOk: 'הבקשה נשלחה',
+  openThread: 'פתיחת שיחה',
+  conversation: 'שיחה',
+  reply: 'תשובה',
+  replyPlaceholder: 'כתבו תשובה…',
+  replyPlaceholderAdmin: 'הוסיפו הערה לתלמיד…',
+  sendReply: 'שליחה',
+  pickRequest: 'בחרו בקשה מהרשימה',
+  lastMsg: 'אחרון',
+  queue: 'תור בקשות',
+  ticket: 'בקשה נבחרת',
+  you: 'אתם',
+  adminRole: 'ניהול',
+  studentRole: 'תלמיד',
+  noMessages: 'אין הודעות עדיין.',
+  reopenHint: 'תשובה שלכם תפתח מחדש את הבקשה אצל הניהול.',
+  adminReplied: 'תשובה מהניהול',
+  waitingYourReply: 'צריך תשובה',
+  waitingStudent: 'ממתין לתלמיד',
+  waitingAdmin: 'ממתין לניהול',
+  closedTicket: 'סגור',
+  nextAction: 'מצב',
+  lastFromAdmin: 'מהניהול',
+  lastFromYou: 'מאתכם',
+  lastFromStudent: 'מהתלמיד',
   admin: 'ניהול',
-  adminLead: 'בקשות, קבוצות מכשירים ורשימות מותרים.',
+  adminLead: 'בקשות, שיחות ורשימות מותרים.',
   tabRequests: 'בקשות',
   tabGroups: 'קבוצות',
-  tabAllow: 'רשימות מותרים',
+  tabAllow: 'מותרים',
+  tabDevices: 'מכשירים',
   status: 'סטטוס',
   type: 'סוג',
   all: 'הכול',
   pending: 'ממתין',
-  approved: 'אושר',
+  approved: 'מאושר ברשימה',
   denied: 'נדחה',
   resolved: 'טופל',
   open: 'פתוח',
   closed: 'סגור',
-  sort: 'מיון',
-  newest: 'החדש קודם',
-  oldest: 'הישן קודם',
   searchPlaceholder: 'חיפוש…',
   approve1h: 'אישור לשעה',
   approveForever: 'אישור קבוע',
+  approveForeverHint: 'מוסיף לרשימת המותרים בלי תפוגה',
+  moreOptions: 'עוד משכים',
   deny: 'דחייה',
-  resolve: 'סמן כטופל',
+  resolve: 'סגירה כטופל',
+  resolveBug: 'סגירה כטופל',
+  resolveGeneral: 'סגירה כטופל',
+  denyGeneral: 'דחייה',
   grantScope: 'היקף האישור',
-  thisDevice: 'המכשיר הזה',
+  thisDevice: 'מכשיר זה',
   aGroup: 'קבוצה',
   everyone: 'כולם',
-  createGroup: 'יצירת קבוצה',
+  createGroup: 'קבוצה חדשה',
   groupName: 'שם',
-  groupDesc: 'תיאור (אופציונלי)',
+  groupDesc: 'תיאור',
   members: 'חברים',
   saveMembers: 'שמירת חברים',
-  viewAllow: 'רשימת מותרים',
+  viewAllow: 'מותרים',
   delete: 'מחיקה',
-  noGroups: 'אין קבוצות — יצירה למעלה.',
+  noGroups: 'אין קבוצות עדיין.',
   addAllow: 'הוספת הרשאה',
   kind: 'סוג',
   scope: 'היקף',
   duration: 'משך',
-  permanent: 'קבוע',
+  permanent: 'קבוע (בלי תפוגה)',
   hour: 'שעה',
   day: '24 שעות',
   minutes15: '15 דקות',
-  today: 'עד סוף היום',
-  addToAllow: 'הוספה לרשימה',
-  global: 'כולם (גלובלי)',
+  today: 'היום',
+  addToAllow: 'הוספה',
+  global: 'כולם',
   group: 'קבוצה',
-  deviceEffective: 'מכשיר (אפקטיבי)',
-  allSources: 'כל המקורות',
-  appsAndUrls: 'אפליקציות ואתרים',
-  appsOnly: 'אפליקציות בלבד',
-  urlsOnly: 'אתרים בלבד',
+  deviceEffective: 'מכשיר',
+  allSources: 'הכול',
+  appsAndUrls: 'הכול',
+  appsOnly: 'אפליקציות',
+  urlsOnly: 'אתרים',
   loading: 'טוען…',
-  emptyRequests: 'אין בקשות התואמות לסינון.',
-  emptyAllow: 'אין פריטים התואמים לסינון.',
-  created: 'נוצר',
-  expires: 'פג תוקף',
+  emptyRequests: 'אין בקשות להצגה.',
+  emptyAllow: 'אין פריטים ברשימה.',
+  emptyDevices: 'אין מכשירים ידועים עדיין.',
   by: 'מאת',
-  error: 'שגיאה',
   ok: 'בוצע',
-  rename: 'שינוי שם',
+  rename: 'שם',
   save: 'שמירה',
   revoke: 'הסרה',
-  nickname: 'כינוי',
+  revokeConfirm: 'להסיר את ההרשאה?',
+  nickname: 'כינויי מכשירים',
+  nicknameHint: 'שם ידידותי שמופיע בבקשות ובקבוצות.',
   memberCount: 'חברים',
-  filterDevices: 'סינון מכשירים…',
+  filterDevices: 'סינון…',
   sourceEssential: 'חיוני',
   sourceGlobal: 'גלובלי',
   sourceGroup: 'קבוצה',
   sourceDevice: 'מכשיר',
   sourceGrant: 'זמני',
+  essentialNote: 'חיוני למערכת — לא ניתן להסיר',
+  openGroup: 'ניהול',
+  close: 'סגירה',
+  details: 'פרטים על האפליקציה',
+  hideDetails: 'הסתרת פרטים',
+  showDetails: 'הצגת פרטים',
+  loadingDetails: 'טוען פרטים מחנות האפליקציות…',
+  appStoreLink: 'פתיחה ב-App Store',
+  genre: 'קטגוריה',
+  version: 'גרסה',
+  rating: 'דירוג',
+  contentRating: 'גיל',
+  price: 'מחיר',
+  size: 'גודל',
+  released: 'יצא לאור',
+  seller: 'מפיץ',
+  bundleId: 'מזהה טכני',
+  advancedInfo: 'מידע מתקדם',
+  showMore: 'הצג עוד',
+  showLess: 'הצג פחות',
+  free: 'חינם',
+  description: 'תיאור',
+  screenshots: 'צילומי מסך',
+  messages: 'הודעות',
+  back: 'חזרה',
+  /** Status copy depends on request type — use statusFor(). */
   statusLabel: {
-    pending: 'ממתין',
-    approved: 'אושר',
+    pending: 'ממתין לתשובה',
+    approved: 'מאושר ברשימה',
     denied: 'נדחה',
     resolved: 'טופל',
   } as Record<string, string>,
@@ -115,4 +171,46 @@ export const he = {
   } as Record<string, string>,
 } as const
 
-export type HeKey = keyof typeof he
+/** Human status for a ticket — access vs general/bug mean different things. */
+export function statusFor(type: string, status: string): string {
+  if (status === 'pending') return 'ממתין לתשובה'
+  if (status === 'denied') return type === 'access' ? 'גישה נדחתה' : 'נדחה'
+  if (status === 'resolved') {
+    if (type === 'bug') return 'טופל / נסגר'
+    return 'טופל'
+  }
+  if (status === 'approved') {
+    if (type === 'access') return 'מאושר ברשימת המותרים'
+    return 'טופל' // legacy general that used "approved"
+  }
+  return he.statusLabel[status] || status
+}
+
+export function statusClass(status: string): string {
+  if (status === 'pending') return 'warn'
+  if (status === 'denied') return 'bad'
+  return 'ok'
+}
+
+/** What should happen next — for admin queue clarity. */
+export function adminNextAction(type: string, status: string, lastAuthor?: string): { label: string; kind: 'act' | 'wait' | 'done' } {
+  if (status !== 'pending') {
+    return { label: statusFor(type, status), kind: 'done' }
+  }
+  if (lastAuthor === 'student' || !lastAuthor) {
+    return { label: he.waitingYourReply, kind: 'act' }
+  }
+  return { label: he.waitingStudent, kind: 'wait' }
+}
+
+/** What the student should notice on the device portal. */
+export function studentNextAction(type: string, status: string, lastAuthor?: string): { label: string; kind: 'act' | 'wait' | 'done' } {
+  if (status !== 'pending') {
+    return { label: statusFor(type, status), kind: 'done' }
+  }
+  if (lastAuthor === 'admin') {
+    return { label: he.adminReplied, kind: 'act' }
+  }
+  return { label: he.waitingAdmin, kind: 'wait' }
+}
+

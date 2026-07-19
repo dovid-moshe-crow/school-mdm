@@ -42,13 +42,15 @@ func (a *API) handleDeviceRequests(w http.ResponseWriter, r *http.Request) {
 		if req.EnrollmentID != enrollment {
 			continue
 		}
-		item := requestRow{Request: req}
-		if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp {
-			item.App = a.lookupAppMeta(r, req.Value)
-		}
-		out = append(out, item)
+		out = append(out, a.enrichRequest(r, req))
 	}
 	sort.Slice(out, func(i, j int) bool {
+		// Admin replied last → surface first on the device portal
+		ai := out[i].LastMessage != nil && out[i].LastMessage.AuthorRole == store.AuthorAdmin
+		aj := out[j].LastMessage != nil && out[j].LastMessage.AuthorRole == store.AuthorAdmin
+		if ai != aj {
+			return ai
+		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
 	writeJSON(w, http.StatusOK, out)
@@ -98,24 +100,116 @@ func (a *API) accessStatus(r *http.Request, enrollment string, kind policy.Kind,
 	return "none", nil
 }
 
+// accessIndex preloads allowlist + request state once for annotating many apps.
+type accessIndex struct {
+	allowed map[string]struct{}
+	pending map[string]struct{}
+	denied  map[string]struct{}
+}
+
+func (a *API) buildAccessIndex(r *http.Request, enrollment string) (*accessIndex, error) {
+	idx := &accessIndex{
+		allowed: map[string]struct{}{},
+		pending: map[string]struct{}{},
+		denied:  map[string]struct{}{},
+	}
+	apps, _, err := a.Service.EffectiveAllowlist(r.Context(), enrollment)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range apps {
+		idx.allowed[v] = struct{}{}
+	}
+	reqs, err := a.Store.ListRequests(r.Context(), nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, req := range reqs {
+		if req.EnrollmentID != enrollment || req.Type != store.TypeAccess || req.TargetKind != policy.KindApp {
+			continue
+		}
+		v := policy.Normalize(policy.KindApp, req.Value)
+		if req.Status == store.StatusPending {
+			idx.pending[v] = struct{}{}
+		} else if req.Status == store.StatusDenied {
+			idx.denied[v] = struct{}{}
+		}
+	}
+	return idx, nil
+}
+
+func (idx *accessIndex) status(bundleID string) string {
+	v := policy.Normalize(policy.KindApp, bundleID)
+	if _, ok := idx.allowed[v]; ok {
+		return "allowed"
+	}
+	if _, ok := idx.pending[v]; ok {
+		return "pending"
+	}
+	if _, ok := idx.denied[v]; ok {
+		return "denied"
+	}
+	return "none"
+}
+
 func (a *API) annotateApps(r *http.Request, list []store.AppMeta, enrollment string) []map[string]any {
+	var idx *accessIndex
+	if enrollment != "" {
+		idx, _ = a.buildAccessIndex(r, enrollment)
+	}
 	out := make([]map[string]any, 0, len(list))
 	for _, m := range list {
-		row := map[string]any{
-			"bundle_id":   m.BundleID,
-			"track_id":    m.TrackID,
-			"app_name":    m.Name,
-			"developer":   m.Artist,
-			"artwork_url": m.ArtworkURL,
-			"store_url":   m.StoreURL,
-		}
-		if enrollment != "" {
-			st, err := a.accessStatus(r, enrollment, policy.KindApp, m.BundleID)
-			if err == nil {
-				row["access_status"] = st
-			}
+		row := appMetaJSON(m)
+		if idx != nil {
+			row["access_status"] = idx.status(m.BundleID)
 		}
 		out = append(out, row)
 	}
 	return out
+}
+
+func appMetaJSON(m store.AppMeta) map[string]any {
+	row := map[string]any{
+		"bundle_id":   m.BundleID,
+		"track_id":    m.TrackID,
+		"app_name":    m.Name,
+		"developer":   m.Artist,
+		"artwork_url": m.ArtworkURL,
+		"store_url":   m.StoreURL,
+		"source":      m.Source,
+	}
+	if m.Description != "" {
+		row["description"] = m.Description
+	}
+	if m.Genre != "" {
+		row["genre"] = m.Genre
+	}
+	if m.Version != "" {
+		row["version"] = m.Version
+	}
+	if m.AverageRating > 0 {
+		row["average_rating"] = m.AverageRating
+	}
+	if m.RatingCount > 0 {
+		row["rating_count"] = m.RatingCount
+	}
+	if m.ContentRating != "" {
+		row["content_rating"] = m.ContentRating
+	}
+	if m.ReleaseDate != "" {
+		row["release_date"] = m.ReleaseDate
+	}
+	if m.FormattedPrice != "" {
+		row["formatted_price"] = m.FormattedPrice
+	}
+	if m.FileSizeBytes > 0 {
+		row["file_size_bytes"] = m.FileSizeBytes
+	}
+	if m.SellerName != "" {
+		row["seller_name"] = m.SellerName
+	}
+	if len(m.Screenshots) > 0 {
+		row["screenshots"] = m.Screenshots
+	}
+	return row
 }

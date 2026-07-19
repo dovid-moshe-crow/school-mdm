@@ -13,7 +13,23 @@ import (
 
 type requestRow struct {
 	store.Request
-	App *store.AppMeta `json:"app,omitempty"`
+	App          *store.AppMeta       `json:"app,omitempty"`
+	MessageCount int                  `json:"message_count,omitempty"`
+	LastMessage  *store.RequestMessage `json:"last_message,omitempty"`
+}
+
+func (a *API) enrichRequest(r *http.Request, req store.Request) requestRow {
+	item := requestRow{Request: req}
+	if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp {
+		item.App = a.lookupAppMeta(r, req.Value)
+	}
+	if n, err := a.Store.CountRequestMessages(r.Context(), req.ID); err == nil {
+		item.MessageCount = n
+	}
+	if last, err := a.Store.LastRequestMessage(r.Context(), req.ID); err == nil {
+		item.LastMessage = &last
+	}
+	return item
 }
 
 type allowanceRow struct {
@@ -63,11 +79,7 @@ func (a *API) handleListRequests(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]requestRow, 0, len(filtered))
 	for _, req := range filtered {
-		item := requestRow{Request: req}
-		if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp {
-			item.App = a.lookupAppMeta(r, req.Value)
-		}
-		out = append(out, item)
+		out = append(out, a.enrichRequest(r, req))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

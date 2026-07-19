@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -281,6 +282,85 @@ func (s *Store) UpdateRequest(ctx context.Context, req store.Request) error {
 	return nil
 }
 
+func (s *Store) ListRequestMessages(ctx context.Context, requestID string) ([]store.RequestMessage, error) {
+	if _, err := s.GetRequest(ctx, requestID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, request_id, author_role, body, created_at
+		FROM request_messages
+		WHERE request_id=$1
+		ORDER BY created_at ASC, id ASC
+	`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.RequestMessage
+	for rows.Next() {
+		var m store.RequestMessage
+		var role string
+		if err := rows.Scan(&m.ID, &m.RequestID, &role, &m.Body, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.AuthorRole = store.MessageAuthor(role)
+		out = append(out, m)
+	}
+	if out == nil {
+		out = []store.RequestMessage{}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddRequestMessage(ctx context.Context, msg store.RequestMessage) (store.RequestMessage, error) {
+	if _, err := s.GetRequest(ctx, msg.RequestID); err != nil {
+		return store.RequestMessage{}, err
+	}
+	if msg.ID == "" {
+		msg.ID = uuid.NewString()
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO request_messages (id, request_id, author_role, body, created_at)
+		VALUES ($1,$2,$3,$4,$5)
+	`, msg.ID, msg.RequestID, string(msg.AuthorRole), msg.Body, msg.CreatedAt)
+	return msg, err
+}
+
+func (s *Store) CountRequestMessages(ctx context.Context, requestID string) (int, error) {
+	if _, err := s.GetRequest(ctx, requestID); err != nil {
+		return 0, err
+	}
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM request_messages WHERE request_id=$1`, requestID).Scan(&n)
+	return n, err
+}
+
+func (s *Store) LastRequestMessage(ctx context.Context, requestID string) (store.RequestMessage, error) {
+	if _, err := s.GetRequest(ctx, requestID); err != nil {
+		return store.RequestMessage{}, err
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, request_id, author_role, body, created_at
+		FROM request_messages
+		WHERE request_id=$1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, requestID)
+	var m store.RequestMessage
+	var role string
+	if err := row.Scan(&m.ID, &m.RequestID, &role, &m.Body, &m.CreatedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			return store.RequestMessage{}, store.ErrNotFound
+		}
+		return store.RequestMessage{}, err
+	}
+	m.AuthorRole = store.MessageAuthor(role)
+	return m, nil
+}
+
 type scannable interface {
 	Scan(dest ...any) error
 }
@@ -299,16 +379,18 @@ func scanRequest(row scannable) (store.Request, error) {
 
 func (s *Store) GetAppMeta(ctx context.Context, bundleID string) (store.AppMeta, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at
+		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at, details
 		FROM app_metadata WHERE bundle_id=$1
 	`, strings.ToLower(strings.TrimSpace(bundleID)))
 	var m store.AppMeta
-	if err := row.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt); err != nil {
+	var details []byte
+	if err := row.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt, &details); err != nil {
 		if err == pgx.ErrNoRows {
 			return store.AppMeta{}, fmt.Errorf("app %s: %w", bundleID, store.ErrNotFound)
 		}
 		return store.AppMeta{}, err
 	}
+	applyAppDetails(&m, details)
 	return m, nil
 }
 
@@ -320,17 +402,25 @@ func (s *Store) UpsertAppMeta(ctx context.Context, meta store.AppMeta) error {
 	if meta.UpdatedAt.IsZero() {
 		meta.UpdatedAt = time.Now().UTC()
 	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO app_metadata (bundle_id, track_id, name, artist, artwork_url, store_url, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+	details, err := marshalAppDetails(meta)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO app_metadata (bundle_id, track_id, name, artist, artwork_url, store_url, updated_at, details)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT (bundle_id) DO UPDATE SET
 			track_id = EXCLUDED.track_id,
 			name = EXCLUDED.name,
 			artist = EXCLUDED.artist,
 			artwork_url = EXCLUDED.artwork_url,
 			store_url = EXCLUDED.store_url,
-			updated_at = EXCLUDED.updated_at
-	`, meta.BundleID, meta.TrackID, meta.Name, meta.Artist, meta.ArtworkURL, meta.StoreURL, meta.UpdatedAt)
+			updated_at = EXCLUDED.updated_at,
+			details = CASE
+				WHEN EXCLUDED.details = '{}'::jsonb THEN app_metadata.details
+				ELSE EXCLUDED.details
+			END
+	`, meta.BundleID, meta.TrackID, meta.Name, meta.Artist, meta.ArtworkURL, meta.StoreURL, meta.UpdatedAt, details)
 	return err
 }
 
@@ -340,7 +430,7 @@ func (s *Store) SearchAppMeta(ctx context.Context, query string, limit int) ([]s
 	}
 	q := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
 	rows, err := s.pool.Query(ctx, `
-		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at
+		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at, details
 		FROM app_metadata
 		WHERE lower(name) LIKE $1 OR lower(artist) LIKE $1 OR bundle_id LIKE $1
 		ORDER BY name ASC
@@ -353,12 +443,71 @@ func (s *Store) SearchAppMeta(ctx context.Context, query string, limit int) ([]s
 	var out []store.AppMeta
 	for rows.Next() {
 		var m store.AppMeta
-		if err := rows.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt); err != nil {
+		var details []byte
+		if err := rows.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt, &details); err != nil {
 			return nil, err
 		}
+		applyAppDetails(&m, details)
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+type appDetailsJSON struct {
+	Description    string   `json:"description,omitempty"`
+	Genre          string   `json:"genre,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	AverageRating  float64  `json:"average_rating,omitempty"`
+	RatingCount    int      `json:"rating_count,omitempty"`
+	ContentRating  string   `json:"content_rating,omitempty"`
+	ReleaseDate    string   `json:"release_date,omitempty"`
+	FormattedPrice string   `json:"formatted_price,omitempty"`
+	FileSizeBytes  int64    `json:"file_size_bytes,omitempty"`
+	SellerName     string   `json:"seller_name,omitempty"`
+	Screenshots    []string `json:"screenshots,omitempty"`
+}
+
+func marshalAppDetails(m store.AppMeta) ([]byte, error) {
+	d := appDetailsJSON{
+		Description:    m.Description,
+		Genre:          m.Genre,
+		Version:        m.Version,
+		AverageRating:  m.AverageRating,
+		RatingCount:    m.RatingCount,
+		ContentRating:  m.ContentRating,
+		ReleaseDate:    m.ReleaseDate,
+		FormattedPrice: m.FormattedPrice,
+		FileSizeBytes:  m.FileSizeBytes,
+		SellerName:     m.SellerName,
+		Screenshots:    m.Screenshots,
+	}
+	if d.Description == "" && d.Genre == "" && d.Version == "" && d.AverageRating == 0 &&
+		d.RatingCount == 0 && d.ContentRating == "" && d.ReleaseDate == "" &&
+		d.FormattedPrice == "" && d.FileSizeBytes == 0 && d.SellerName == "" && len(d.Screenshots) == 0 {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(d)
+}
+
+func applyAppDetails(m *store.AppMeta, raw []byte) {
+	if len(raw) == 0 || string(raw) == "{}" || string(raw) == "null" {
+		return
+	}
+	var d appDetailsJSON
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return
+	}
+	m.Description = d.Description
+	m.Genre = d.Genre
+	m.Version = d.Version
+	m.AverageRating = d.AverageRating
+	m.RatingCount = d.RatingCount
+	m.ContentRating = d.ContentRating
+	m.ReleaseDate = d.ReleaseDate
+	m.FormattedPrice = d.FormattedPrice
+	m.FileSizeBytes = d.FileSizeBytes
+	m.SellerName = d.SellerName
+	m.Screenshots = d.Screenshots
 }
 
 func (s *Store) ListGroups(ctx context.Context) ([]store.Group, error) {

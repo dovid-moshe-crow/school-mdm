@@ -37,20 +37,38 @@ type DecideInput struct {
 	GroupID   string // required when Scope=group
 }
 
-// CreateRequest stores a pending request.
+// CreateRequest stores a pending request and seeds the conversation with the reason.
 func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (store.Request, error) {
 	typ, target, value, err := normalizeCreate(in)
 	if err != nil {
 		return store.Request{}, err
 	}
-	return s.Store.CreateRequest(ctx, store.Request{
+	reason := strings.TrimSpace(in.Reason)
+	req, err := s.Store.CreateRequest(ctx, store.Request{
 		Type:         typ,
 		TargetKind:   target,
 		Value:        value,
 		EnrollmentID: strings.TrimSpace(in.EnrollmentID),
-		Reason:       strings.TrimSpace(in.Reason),
+		Reason:       reason,
 		Status:       store.StatusPending,
 	})
+	if err != nil {
+		return store.Request{}, err
+	}
+	body := reason
+	if body == "" {
+		body = value
+	}
+	if body != "" {
+		if _, err := s.Store.AddRequestMessage(ctx, store.RequestMessage{
+			RequestID:  req.ID,
+			AuthorRole: store.AuthorStudent,
+			Body:       body,
+		}); err != nil {
+			return store.Request{}, err
+		}
+	}
+	return req, nil
 }
 
 func normalizeCreate(in CreateRequestInput) (store.RequestType, policy.Kind, string, error) {
@@ -153,15 +171,9 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 		}
 		return req, nil
 
-	case store.TypeBug:
+	case store.TypeBug, store.TypeGeneral:
+		// General and bug tickets are "handled", not allowlist-approved.
 		req.Status = store.StatusResolved
-		if err := s.Store.UpdateRequest(ctx, req); err != nil {
-			return store.Request{}, err
-		}
-		return req, nil
-
-	case store.TypeGeneral:
-		req.Status = store.StatusApproved
 		if err := s.Store.UpdateRequest(ctx, req); err != nil {
 			return store.Request{}, err
 		}
@@ -170,6 +182,58 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 	default:
 		return store.Request{}, fmt.Errorf("unknown request type %q", req.Type)
 	}
+}
+
+// PostMessageInput is a reply on a request thread.
+type PostMessageInput struct {
+	RequestID    string
+	AuthorRole   store.MessageAuthor
+	Body         string
+	EnrollmentID string // required when AuthorRole=student; must match request
+}
+
+// PostMessage appends a message. Student replies reopen closed tickets to pending.
+func (s *Service) PostMessage(ctx context.Context, in PostMessageInput) (store.RequestMessage, error) {
+	body := strings.TrimSpace(in.Body)
+	if body == "" {
+		return store.RequestMessage{}, fmt.Errorf("message body is required")
+	}
+	if in.AuthorRole != store.AuthorStudent && in.AuthorRole != store.AuthorAdmin {
+		return store.RequestMessage{}, fmt.Errorf("author_role must be student or admin")
+	}
+
+	req, err := s.Store.GetRequest(ctx, in.RequestID)
+	if err != nil {
+		return store.RequestMessage{}, err
+	}
+
+	if in.AuthorRole == store.AuthorStudent {
+		want := strings.TrimSpace(req.EnrollmentID)
+		got := strings.TrimSpace(in.EnrollmentID)
+		if want == "" || got == "" || want != got {
+			return store.RequestMessage{}, fmt.Errorf("device does not own this request")
+		}
+	}
+
+	msg, err := s.Store.AddRequestMessage(ctx, store.RequestMessage{
+		RequestID:  req.ID,
+		AuthorRole: in.AuthorRole,
+		Body:       body,
+	})
+	if err != nil {
+		return store.RequestMessage{}, err
+	}
+
+	// Student reply reopens a closed conversation so admin sees it again.
+	if in.AuthorRole == store.AuthorStudent && req.Status != store.StatusPending {
+		req.Status = store.StatusPending
+		req.DecidedAt = nil
+		req.Duration = ""
+		if err := s.Store.UpdateRequest(ctx, req); err != nil {
+			return store.RequestMessage{}, err
+		}
+	}
+	return msg, nil
 }
 
 func resolveApproveTarget(in DecideInput, req store.Request) (policy.Target, error) {

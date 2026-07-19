@@ -19,6 +19,7 @@ type Store struct {
 	allowlist map[string]policy.Entry
 	grants    map[string]policy.Grant
 	requests  map[string]store.Request
+	messages  map[string][]store.RequestMessage // requestID -> chronological
 	apps      map[string]store.AppMeta
 	groups    map[string]store.Group
 	members   map[string]map[string]struct{} // groupID -> enrollmentID set
@@ -31,6 +32,7 @@ func New() *Store {
 		allowlist: map[string]policy.Entry{},
 		grants:    map[string]policy.Grant{},
 		requests:  map[string]store.Request{},
+		messages:  map[string][]store.RequestMessage{},
 		apps:      map[string]store.AppMeta{},
 		groups:    map[string]store.Group{},
 		members:   map[string]map[string]struct{}{},
@@ -165,6 +167,56 @@ func (s *Store) UpdateRequest(_ context.Context, req store.Request) error {
 	}
 	s.requests[req.ID] = req
 	return nil
+}
+
+func (s *Store) ListRequestMessages(_ context.Context, requestID string) ([]store.RequestMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.requests[requestID]; !ok {
+		return nil, fmt.Errorf("request %s: %w", requestID, store.ErrNotFound)
+	}
+	src := s.messages[requestID]
+	out := make([]store.RequestMessage, len(src))
+	copy(out, src)
+	return out, nil
+}
+
+func (s *Store) AddRequestMessage(_ context.Context, msg store.RequestMessage) (store.RequestMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.requests[msg.RequestID]; !ok {
+		return store.RequestMessage{}, fmt.Errorf("request %s: %w", msg.RequestID, store.ErrNotFound)
+	}
+	if msg.ID == "" {
+		msg.ID = uuid.NewString()
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+	s.messages[msg.RequestID] = append(s.messages[msg.RequestID], msg)
+	return msg, nil
+}
+
+func (s *Store) CountRequestMessages(_ context.Context, requestID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.requests[requestID]; !ok {
+		return 0, fmt.Errorf("request %s: %w", requestID, store.ErrNotFound)
+	}
+	return len(s.messages[requestID]), nil
+}
+
+func (s *Store) LastRequestMessage(_ context.Context, requestID string) (store.RequestMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.requests[requestID]; !ok {
+		return store.RequestMessage{}, fmt.Errorf("request %s: %w", requestID, store.ErrNotFound)
+	}
+	msgs := s.messages[requestID]
+	if len(msgs) == 0 {
+		return store.RequestMessage{}, store.ErrNotFound
+	}
+	return msgs[len(msgs)-1], nil
 }
 
 func (s *Store) GetAppMeta(_ context.Context, bundleID string) (store.AppMeta, error) {
