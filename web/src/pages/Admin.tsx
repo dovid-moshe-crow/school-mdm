@@ -30,6 +30,7 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { api, type Allowance, type AppMeta, type Device, type Group, type Request } from '../api'
 import { RequestThread } from '../components/RequestThread'
+import { useIsMobile } from '../hooks/useIsMobile'
 import { he, statusClass, adminNextAction } from '../he'
 import { AppThumb, useDebounced } from '../ui'
 
@@ -307,9 +308,11 @@ export default function Admin() {
     )
   }, [devices, memberFilter])
 
+  const isMobile = useIsMobile()
+
   const selectedReq =
     requests.find((x) => x.id === selectedReqId) ||
-    (!selectedReqId ? requests[0] ?? null : null)
+    (!isMobile && !selectedReqId ? requests[0] ?? null : null)
 
   async function refreshMeta() {
     await Promise.all([
@@ -336,8 +339,9 @@ export default function Admin() {
       }
       return api.decide(id, approve, body)
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, vars) => {
       message.success(he.ok)
+      if (selectedReqId === vars.id) void setSelectedReqId(null)
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['requests'] }),
         refreshMeta(),
@@ -358,12 +362,14 @@ export default function Admin() {
   const allowancesLoading =
     tab === 'allowances' && allowancesEnabled && allowancesQuery.isLoading && !allowancesQuery.data
   const allowancesFetching = tab === 'allowances' && allowancesEnabled && allowancesQuery.isFetching
+  const showQueue = !isMobile || !selectedReqId
+  const showTicket = !isMobile || !!selectedReqId
 
   return (
     <div className="page-shell wide">
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
-          <Typography.Title level={2} style={{ marginBottom: 8 }}>
+          <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
             {he.admin}
           </Typography.Title>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
@@ -374,6 +380,9 @@ export default function Admin() {
         <Tabs
           activeKey={tab}
           onChange={(k) => void setTab(k as TabKey)}
+          size={isMobile ? 'small' : 'middle'}
+          tabBarGutter={isMobile ? 8 : undefined}
+          moreIcon={null}
           items={[
             {
               key: 'requests',
@@ -386,7 +395,7 @@ export default function Admin() {
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   <Card size="small">
                     <Flex wrap="wrap" gap={12}>
-                      <div style={{ minWidth: 140, flex: 1 }}>
+                      <div className="filter-field">
                         <Typography.Text type="secondary">{he.status}</Typography.Text>
                         <Select
                           style={{ width: '100%', marginTop: 4 }}
@@ -403,7 +412,7 @@ export default function Admin() {
                           ]}
                         />
                       </div>
-                      <div style={{ minWidth: 140, flex: 1 }}>
+                      <div className="filter-field">
                         <Typography.Text type="secondary">{he.type}</Typography.Text>
                         <Select
                           style={{ width: '100%', marginTop: 4 }}
@@ -417,7 +426,7 @@ export default function Admin() {
                           ]}
                         />
                       </div>
-                      <div style={{ minWidth: 160, flex: 1 }}>
+                      <div className="filter-field">
                         <Typography.Text type="secondary">{he.device}</Typography.Text>
                         <Select
                           style={{ width: '100%', marginTop: 4 }}
@@ -431,7 +440,7 @@ export default function Admin() {
                           }))}
                         />
                       </div>
-                      <div style={{ minWidth: 200, flex: 2 }}>
+                      <div className="filter-field grow">
                         <Typography.Text type="secondary">{he.search}</Typography.Text>
                         <Input
                           style={{ marginTop: 4 }}
@@ -451,6 +460,7 @@ export default function Admin() {
                   {!!requests.length && (
                     <Spin spinning={requestsFetching && !requestsLoading}>
                       <Row gutter={[16, 16]} className="inbox-grid">
+                        {showQueue && (
                         <Col xs={24} md={9}>
                           <Card size="small" title={he.queue} styles={{ body: { padding: 0 } }}>
                             <div className="inbox-queue">
@@ -466,9 +476,9 @@ export default function Admin() {
                                   const active = selectedReq?.id === r.id
                                   return (
                                     <List.Item
+                                      className="tap-row"
                                       onClick={() => void setSelectedReqId(r.id)}
                                       style={{
-                                        cursor: 'pointer',
                                         paddingInline: 12,
                                         background: active ? '#eef7f2' : undefined,
                                       }}
@@ -485,7 +495,7 @@ export default function Admin() {
                                         }
                                         title={
                                           <Flex justify="space-between" gap={8} align="center">
-                                            <Typography.Text ellipsis style={{ maxWidth: 160 }}>
+                                            <Typography.Text ellipsis style={{ flex: 1, minWidth: 0 }}>
                                               {r.app?.app_name || r.value}
                                             </Typography.Text>
                                             <Tag color={nextTagColor(next.kind, r.status)}>
@@ -510,8 +520,25 @@ export default function Admin() {
                             </div>
                           </Card>
                         </Col>
+                        )}
+                        {showTicket && (
                         <Col xs={24} md={15}>
-                          <Card size="small" title={he.ticket}>
+                          <Card
+                            size="small"
+                            title={he.ticket}
+                            extra={
+                              isMobile && selectedReq ? (
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  onClick={() => void setSelectedReqId(null)}
+                                  style={{ paddingInline: 0 }}
+                                >
+                                  {he.back}
+                                </Button>
+                              ) : undefined
+                            }
+                          >
                             {!selectedReq && <Empty description={he.pickRequest} />}
                             {selectedReq && (() => {
                               const r = selectedReq
@@ -524,8 +551,8 @@ export default function Admin() {
                               )
                               return (
                                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                                  <Flex justify="space-between" gap={12} align="start">
-                                    <Flex gap={10} align="center">
+                                  <Flex justify="space-between" gap={12} align="start" wrap="wrap">
+                                    <Flex gap={10} align="center" style={{ minWidth: 0, flex: 1 }}>
                                       {r.type === 'access' && r.kind === 'app' && (
                                         <AppThumb
                                           name={r.app?.app_name || r.value}
@@ -533,7 +560,7 @@ export default function Admin() {
                                           size={40}
                                         />
                                       )}
-                                      <div>
+                                      <div style={{ minWidth: 0 }}>
                                         <Typography.Text strong>
                                           {r.app?.app_name || r.value}
                                         </Typography.Text>
@@ -561,9 +588,9 @@ export default function Admin() {
                                   />
 
                                   {r.status === 'pending' && r.type === 'access' && (
-                                    <Flex wrap="wrap" gap={8}>
+                                    <Flex wrap="wrap" gap={8} className="decide-actions">
                                       <Select
-                                        style={{ minWidth: 140 }}
+                                        style={{ minWidth: isMobile ? undefined : 140 }}
                                         value={scope}
                                         onChange={(v) =>
                                           setApproveScope((s) => ({ ...s, [r.id]: v }))
@@ -576,7 +603,7 @@ export default function Admin() {
                                       />
                                       {scope === 'group' && (
                                         <Select
-                                          style={{ minWidth: 140 }}
+                                          style={{ minWidth: isMobile ? undefined : 140 }}
                                           placeholder="קבוצה…"
                                           value={
                                             approveGroup[r.id] ||
@@ -630,7 +657,7 @@ export default function Admin() {
                                   )}
 
                                   {r.status === 'pending' && r.type !== 'access' && (
-                                    <Space>
+                                    <Flex wrap="wrap" gap={8} className="decide-actions">
                                       <Button
                                         type="primary"
                                         loading={decideMutation.isPending}
@@ -649,13 +676,14 @@ export default function Admin() {
                                       >
                                         {he.denyGeneral}
                                       </Button>
-                                    </Space>
+                                    </Flex>
                                   )}
                                 </Space>
                               )
                             })()}
                           </Card>
                         </Col>
+                        )}
                       </Row>
                     </Spin>
                   )}
@@ -669,6 +697,7 @@ export default function Admin() {
                 <LoadingBlock />
               ) : (
                 <Row gutter={[16, 16]}>
+                  {(!isMobile || !selectedGroup) && (
                   <Col xs={24} md={12}>
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                       <Card title={he.createGroup} size="small">
@@ -749,6 +778,8 @@ export default function Admin() {
                       ))}
                     </Space>
                   </Col>
+                  )}
+                  {(!isMobile || selectedGroup) && (
                   <Col xs={24} md={12}>
                     {!selectedGroup && (
                       <Empty description="בחרו קבוצה" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -759,7 +790,7 @@ export default function Admin() {
                         title={selectedGroup.name}
                         extra={
                           <Button type="link" onClick={() => void setSelectedGroupId(null)}>
-                            {he.close}
+                            {isMobile ? he.back : he.close}
                           </Button>
                         }
                       >
@@ -857,6 +888,7 @@ export default function Admin() {
                       </Card>
                     )}
                   </Col>
+                  )}
                 </Row>
               ),
             },
@@ -869,6 +901,7 @@ export default function Admin() {
                     <Space direction="vertical" style={{ width: '100%' }} size="middle">
                       <Segmented
                         block
+                        size={isMobile ? 'small' : 'middle'}
                         value={allowFilters.ascope}
                         onChange={(v) => {
                           const next = v as (typeof allowScopes)[number]
@@ -890,7 +923,8 @@ export default function Admin() {
                       />
                       <Flex wrap="wrap" gap={12}>
                         <Select
-                          style={{ minWidth: 140 }}
+                          className="filter-field"
+                          style={{ minWidth: isMobile ? '100%' : 140, flex: 1 }}
                           value={allowFilters.akind}
                           onChange={(v) => void setAllowFilters({ akind: v })}
                           options={[
@@ -901,7 +935,7 @@ export default function Admin() {
                         />
                         {allowFilters.ascope === 'group' && (
                           <Select
-                            style={{ minWidth: 160 }}
+                            style={{ minWidth: isMobile ? '100%' : 160, flex: 1 }}
                             value={allowFilters.agroup || undefined}
                             onChange={(v) => void setAllowFilters({ agroup: v })}
                             options={groups.map((g) => ({ value: g.id, label: g.name }))}
@@ -909,7 +943,7 @@ export default function Admin() {
                         )}
                         {allowFilters.ascope === 'device' && (
                           <Select
-                            style={{ minWidth: 160 }}
+                            style={{ minWidth: isMobile ? '100%' : 160, flex: 1 }}
                             value={allowFilters.adevice || undefined}
                             onChange={(v) => void setAllowFilters({ adevice: v })}
                             options={devices.map((d) => ({
@@ -919,13 +953,13 @@ export default function Admin() {
                           />
                         )}
                         <Input
-                          style={{ flex: 1, minWidth: 180 }}
+                          style={{ flex: 1, minWidth: isMobile ? '100%' : 180 }}
                           value={allowFilters.aq}
                           onChange={(e) => void setAllowFilters({ aq: e.target.value })}
                           placeholder={he.searchPlaceholder}
                           allowClear
                         />
-                        <Button type="primary" onClick={() => setAddOpen(true)}>
+                        <Button type="primary" block={isMobile} onClick={() => setAddOpen(true)}>
                           {he.addAllow}
                         </Button>
                       </Flex>
@@ -940,7 +974,7 @@ export default function Admin() {
                     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                       {allowances.map((row, i) => (
                         <Card key={`${row.kind}-${row.value}-${row.source}-${i}`} size="small">
-                          <Flex gap={12} align="start" justify="space-between">
+                          <Flex gap={12} align="start" justify="space-between" wrap="wrap">
                             <Flex gap={12} align="start" style={{ minWidth: 0, flex: 1 }}>
                               {row.kind === 'app' && (
                                 <AppThumb
@@ -1003,13 +1037,16 @@ export default function Admin() {
                     open={addOpen}
                     title={he.addAllow}
                     onClose={() => setAddOpen(false)}
-                    width={400}
+                    width={isMobile ? '100%' : 400}
+                    placement={isMobile ? 'bottom' : 'right'}
+                    height={isMobile ? '90%' : undefined}
                   >
                     <Space direction="vertical" style={{ width: '100%' }} size="middle">
                       <div>
                         <Typography.Text type="secondary">{he.kind}</Typography.Text>
                         <Segmented
                           block
+                          size={isMobile ? 'small' : 'middle'}
                           style={{ marginTop: 4 }}
                           value={addKind}
                           onChange={(v) => {
@@ -1027,6 +1064,7 @@ export default function Admin() {
                         <Typography.Text type="secondary">{he.scope}</Typography.Text>
                         <Segmented
                           block
+                          size={isMobile ? 'small' : 'middle'}
                           style={{ marginTop: 4 }}
                           value={addScope}
                           onChange={(v) => setAddScope(String(v))}

@@ -7,7 +7,7 @@ export default function Home() {
     <div className="page-shell">
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <div>
-          <Typography.Title level={2} style={{ marginBottom: 8 }}>
+          <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
             {he.brand}
           </Typography.Title>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>

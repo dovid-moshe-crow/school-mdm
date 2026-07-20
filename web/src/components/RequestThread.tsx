@@ -1,4 +1,4 @@
-import { Alert, Button, Flex, Input, Spin, Typography } from 'antd'
+import { Alert, Button, Input, Spin, Typography } from 'antd'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
@@ -102,7 +102,7 @@ export function RequestThread({ requestId, role, deviceId, closed, onPosted }: P
       {closed && role === 'student' && (
         <Typography.Text type="secondary">{he.reopenHint}</Typography.Text>
       )}
-      <Flex gap={8}>
+      <div className="thread-compose">
         <Input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -113,7 +113,7 @@ export function RequestThread({ requestId, role, deviceId, closed, onPosted }: P
         <Button type="primary" onClick={send} loading={busy} disabled={!draft.trim()}>
           {he.sendReply}
         </Button>
-      </Flex>
+      </div>
       {err && <Alert type="error" showIcon message={err} />}
     </div>
   )

@@ -28,6 +28,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api, type AccessStatus, type AppMeta } from '../api'
 import { RequestThread } from '../components/RequestThread'
+import { useIsMobile } from '../hooks/useIsMobile'
 import { he, studentNextAction } from '../he'
 import { AppThumb, normalizeHostPreview, useDebounced } from '../ui'
 
@@ -299,18 +300,23 @@ export default function Portal() {
     (category === 'access-url' && urlStatus === 'allowed') ||
     (category === 'access-app' && selected?.access_status === 'allowed')
 
+  const isMobile = useIsMobile()
+
   return (
     <div className="page-shell">
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
-          <Typography.Title level={2} style={{ marginBottom: 8 }}>
+          <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
             {he.portalTitle}
           </Typography.Title>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
             {he.portalLead}
           </Typography.Paragraph>
-          <Tag>
-            {he.device} <Typography.Text code>{deviceId}</Typography.Text>
+          <Tag style={{ maxWidth: '100%', whiteSpace: 'normal', height: 'auto' }}>
+            {he.device}{' '}
+            <Typography.Text code style={{ wordBreak: 'break-all' }}>
+              {deviceId}
+            </Typography.Text>
           </Tag>
         </div>
 
@@ -321,6 +327,7 @@ export default function Portal() {
               <div style={{ marginTop: 8 }}>
                 <Segmented
                   block
+                  size={isMobile ? 'small' : 'middle'}
                   value={category}
                   onChange={(v) => {
                     const next = v as Category
@@ -388,18 +395,20 @@ export default function Portal() {
                   loading={searching && !results.length}
                   renderItem={(item) => (
                     <List.Item
-                      actions={[
-                        <Button
-                          key="pick"
-                          type="link"
-                          onClick={() => {
-                            setSelectedCache(item)
-                            void setParams({ bundle: item.bundle_id, details: true })
-                          }}
-                        >
-                          {he.pick}
-                        </Button>,
-                      ]}
+                      className="tap-row"
+                      onClick={() => {
+                        setSelectedCache(item)
+                        void setParams({ bundle: item.bundle_id, details: true })
+                      }}
+                      actions={
+                        isMobile
+                          ? undefined
+                          : [
+                              <Button key="pick" type="link">
+                                {he.pick}
+                              </Button>,
+                            ]
+                      }
                     >
                       <List.Item.Meta
                         avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
@@ -410,6 +419,9 @@ export default function Portal() {
                             {item.access_status && item.access_status !== 'none'
                               ? statusTag(item.access_status)
                               : null}
+                            {isMobile && (
+                              <Typography.Text type="secondary">{he.pick}</Typography.Text>
+                            )}
                           </Space>
                         }
                       />
@@ -509,6 +521,7 @@ export default function Portal() {
                 return (
                   <Card
                     key={r.id}
+                    className="request-card"
                     size="small"
                     style={
                       highlight === r.id
@@ -516,7 +529,7 @@ export default function Portal() {
                         : undefined
                     }
                     title={
-                      <Flex gap={10} align="center">
+                      <Flex gap={10} align="center" className="card-title-wrap">
                         {r.type === 'access' && r.kind === 'app' && (
                           <AppThumb name={r.app?.app_name || r.value} url={r.app?.artwork_url} size={32} />
                         )}
