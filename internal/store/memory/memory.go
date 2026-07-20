@@ -159,6 +159,19 @@ func (s *Store) ListRequests(_ context.Context, status *store.RequestStatus) ([]
 	return out, nil
 }
 
+func (s *Store) ListRequestsByEnrollment(_ context.Context, enrollmentID string) ([]store.Request, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	out := make([]store.Request, 0)
+	for _, r := range s.requests {
+		if r.EnrollmentID == enrollmentID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) UpdateRequest(_ context.Context, req store.Request) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

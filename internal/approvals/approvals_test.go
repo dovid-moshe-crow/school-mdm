@@ -174,6 +174,29 @@ func TestApproveGroupScopeFansOut(t *testing.T) {
 	}
 }
 
+func TestCreateAccessWithoutReasonDoesNotSeedBundleID(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	svc := &Service{Store: mem, Enqueue: &mdm.StubEnqueuer{}, PortalURL: "http://localhost:8080"}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeAccess,
+		Kind:         policy.KindApp,
+		Value:        "com.google.ios.youtube",
+		EnrollmentID: "device-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := mem.ListRequestMessages(ctx, req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected no seeded message when reason is empty, got %#v", msgs)
+	}
+}
+
 func TestRequestMessageThreadAndReopen(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.New()
@@ -194,6 +217,9 @@ func TestRequestMessageThreadAndReopen(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].AuthorRole != store.AuthorStudent {
 		t.Fatalf("expected seeded student message, got %#v", msgs)
+	}
+	if msgs[0].Body != "Cannot connect in room 12" {
+		t.Fatalf("seeded body = %q", msgs[0].Body)
 	}
 
 	if _, err := svc.Decide(ctx, DecideInput{RequestID: req.ID, Approve: true}); err != nil {

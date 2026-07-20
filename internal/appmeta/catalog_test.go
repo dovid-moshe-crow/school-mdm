@@ -64,48 +64,72 @@ func TestLookupBundleUsesCache(t *testing.T) {
 	}
 }
 
-func TestSearchReturnsCacheImmediately(t *testing.T) {
+func TestSearchUsesItunesNotStaleDB(t *testing.T) {
 	mem := memory.New()
+	// Stale/partial DB hit that used to short-circuit Search and hide iTunes results.
 	_ = mem.UpsertAppMeta(context.Background(), store.AppMeta{
-		BundleID:  "com.google.ios.youtube",
-		Name:      "YouTube",
-		Artist:    "Google",
+		BundleID:  "com.stale.only",
+		Name:      "YouTube Clone Stale",
+		Artist:    "Nobody",
 		UpdatedAt: time.Now().UTC(),
 	})
-	// Slow remote: Search must not wait on it when the DB already has hits.
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
-		_, _ = w.Write([]byte(`{"resultCount":0,"results":[]}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"resultCount":2,"results":[
+			{"bundleId":"com.google.ios.youtube","trackId":1,"trackName":"YouTube","artistName":"Google","artworkUrl100":"https://example.com/a.png"},
+			{"bundleId":"com.google.ios.youtubemusic","trackId":2,"trackName":"YouTube Music","artistName":"Google","artworkUrl100":"https://example.com/b.png"}
+		]}`))
 	}))
-	defer slow.Close()
+	defer srv.Close()
 
+	base, _ := url.Parse(srv.URL)
 	cat := &Catalog{
-		Store:  mem,
-		Client: slow.Client(),
+		Store: mem,
+		Client: &http.Client{
+			Timeout: 2 * time.Second,
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				cloned := req.Clone(req.Context())
+				cloned.URL.Scheme = base.Scheme
+				cloned.URL.Host = base.Host
+				return http.DefaultTransport.RoundTrip(cloned)
+			}),
+		},
 	}
-	// Point Client at slow server; searchiTunes still targets itunes.apple.com.
-	// Warm-cache path returns before any remote round-trip.
-	start := time.Now()
-	list, err := cat.Search(context.Background(), "youtube", 10)
-	elapsed := time.Since(start)
+
+	list, err := cat.Search(context.Background(), "youtube", 25)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) == 0 || list[0].Name != "YouTube" {
-		t.Fatalf("%+v", list)
+	if len(list) < 2 {
+		t.Fatalf("expected live iTunes results, got %#v", list)
 	}
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("Search blocked too long with warm cache: %v", elapsed)
+	if list[0].Name != "YouTube" {
+		t.Fatalf("want YouTube first, got %#v", list)
 	}
 }
 
-func TestItunesURLIncludesCountryAndLang(t *testing.T) {
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestItunesURLIncludesCountryAndOmitsInvalidLang(t *testing.T) {
 	cat := &Catalog{Country: "il", Lang: "he_il"}
 	params := url.Values{}
 	params.Set("term", "test")
 	raw := cat.itunesURL("search", params)
-	if !strings.Contains(raw, "country=il") || !strings.Contains(raw, "lang=he_il") {
-		t.Fatalf("url missing storefront params: %s", raw)
+	if !strings.Contains(raw, "itunes.apple.com/il/search?") {
+		t.Fatalf("want country-prefixed path: %s", raw)
+	}
+	if !strings.Contains(raw, "country=il") {
+		t.Fatalf("url missing country: %s", raw)
+	}
+	if strings.Contains(raw, "lang=") {
+		t.Fatalf("invalid lang must be omitted: %s", raw)
+	}
+
+	cat.Lang = "en_us"
+	raw = cat.itunesURL("search", url.Values{"term": []string{"x"}})
+	if !strings.Contains(raw, "lang=en_us") {
+		t.Fatalf("en_us should be kept: %s", raw)
 	}
 }
 

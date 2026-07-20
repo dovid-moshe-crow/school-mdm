@@ -8,16 +8,10 @@ web:
 run: web
 	go run ./cmd/schoolmdm
 
-# Live reload (Go). Rebuild UI with `make web` or `cd web && npm run dev` (proxy to :8080).
+# Vite HMR UI (:5173) + Air Go API (:8080). Open http://127.0.0.1:5173
 dev:
-	@command -v air >/dev/null 2>&1 || { \
-	  echo "Installing air…"; \
-	  go install github.com/air-verse/air@latest; \
-	}
-	@mkdir -p tmp
-	@test -f internal/webui/dist/index.html || $(MAKE) web
-	env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
-	  air -c .air.toml
+	@chmod +x scripts/dev.sh
+	@./scripts/dev.sh
 
 test:
 	go test ./...

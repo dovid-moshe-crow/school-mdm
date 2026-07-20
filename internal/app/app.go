@@ -63,6 +63,7 @@ func New(ctx context.Context) (*App, error) {
 	}
 	catalog := &appmeta.Catalog{
 		Store:   st,
+		Log:     log,
 		Country: cfg.ItunesCountry,
 		Lang:    cfg.ItunesLang,
 	}

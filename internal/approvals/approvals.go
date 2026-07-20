@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/mdm"
@@ -55,15 +56,13 @@ func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (sto
 	if err != nil {
 		return store.Request{}, err
 	}
-	body := reason
-	if body == "" {
-		body = value
-	}
-	if body != "" {
+	// Seed the thread only with the student's written reason — never the
+	// target value (bundle id / URL), which is already shown on the ticket.
+	if reason != "" {
 		if _, err := s.Store.AddRequestMessage(ctx, store.RequestMessage{
 			RequestID:  req.ID,
 			AuthorRole: store.AuthorStudent,
-			Body:       body,
+			Body:       reason,
 		}); err != nil {
 			return store.Request{}, err
 		}
@@ -325,17 +324,37 @@ func (s *Service) devicesAffectedBy(ctx context.Context, target policy.Target, r
 
 // EffectiveAllowlist returns merged apps and URLs for a device.
 func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (apps, urls []string, err error) {
-	base, err := s.Store.ListAllowlist(ctx)
-	if err != nil {
-		return nil, nil, err
+	var (
+		base   []policy.Entry
+		grants []policy.Grant
+		groups []string
+		err1   error
+		err2   error
+		err3   error
+		wg     sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		base, err1 = s.Store.ListAllowlist(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		grants, err2 = s.Store.ListGrants(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		groups, err3 = s.Store.ListGroupsForDevice(ctx, enrollmentID)
+	}()
+	wg.Wait()
+	if err1 != nil {
+		return nil, nil, err1
 	}
-	grants, err := s.Store.ListGrants(ctx)
-	if err != nil {
-		return nil, nil, err
+	if err2 != nil {
+		return nil, nil, err2
 	}
-	groups, err := s.Store.ListGroupsForDevice(ctx, enrollmentID)
-	if err != nil {
-		return nil, nil, err
+	if err3 != nil {
+		return nil, nil, err3
 	}
 	apps, urls = policy.Effective(base, grants, groups, enrollmentID, time.Now().UTC())
 	return apps, urls, nil

@@ -116,6 +116,7 @@ type Store interface {
 	CreateRequest(ctx context.Context, req Request) (Request, error)
 	GetRequest(ctx context.Context, id string) (Request, error)
 	ListRequests(ctx context.Context, status *RequestStatus) ([]Request, error)
+	ListRequestsByEnrollment(ctx context.Context, enrollmentID string) ([]Request, error)
 	UpdateRequest(ctx context.Context, req Request) error
 
 	ListRequestMessages(ctx context.Context, requestID string) ([]RequestMessage, error)

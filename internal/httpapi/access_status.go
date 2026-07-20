@@ -4,10 +4,19 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
+
+const accessIndexTTL = 15 * time.Second
+
+type cachedAccessIndex struct {
+	at  time.Time
+	idx *accessIndex
+}
 
 // handleAccessStatus reports whether an app/URL is already allowed or has a request for a device.
 func (a *API) handleAccessStatus(w http.ResponseWriter, r *http.Request) {
@@ -32,20 +41,16 @@ func (a *API) handleDeviceRequests(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device id required"})
 		return
 	}
-	all, err := a.Store.ListRequests(r.Context(), nil)
+	all, err := a.Store.ListRequestsByEnrollment(r.Context(), enrollment)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	out := make([]requestRow, 0)
+	out := make([]requestRow, 0, len(all))
 	for _, req := range all {
-		if req.EnrollmentID != enrollment {
-			continue
-		}
 		out = append(out, a.enrichRequest(r, req))
 	}
 	sort.Slice(out, func(i, j int) bool {
-		// Admin replied last → surface first on the device portal
 		ai := out[i].LastMessage != nil && out[i].LastMessage.AuthorRole == store.AuthorAdmin
 		aj := out[j].LastMessage != nil && out[j].LastMessage.AuthorRole == store.AuthorAdmin
 		if ai != aj {
@@ -58,33 +63,33 @@ func (a *API) handleDeviceRequests(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) accessStatus(r *http.Request, enrollment string, kind policy.Kind, value string) (string, error) {
 	value = policy.Normalize(kind, value)
+	if kind == policy.KindApp {
+		idx, err := a.getAccessIndex(r, enrollment)
+		if err != nil {
+			return "", err
+		}
+		return idx.status(value), nil
+	}
 	apps, urls, err := a.Service.EffectiveAllowlist(r.Context(), enrollment)
 	if err != nil {
 		return "", err
 	}
-	if kind == policy.KindApp {
-		for _, v := range apps {
-			if v == value {
-				return "allowed", nil
-			}
-		}
-	} else {
-		for _, v := range urls {
-			if v == value {
-				return "allowed", nil
-			}
+	for _, v := range urls {
+		if v == value {
+			return "allowed", nil
 		}
 	}
-	reqs, err := a.Store.ListRequests(r.Context(), nil)
+	_ = apps
+	reqs, err := a.Store.ListRequestsByEnrollment(r.Context(), enrollment)
 	if err != nil {
 		return "", err
 	}
 	denied := false
 	for _, req := range reqs {
-		if req.EnrollmentID != enrollment || req.Type != store.TypeAccess {
+		if req.Type != store.TypeAccess || req.TargetKind != kind {
 			continue
 		}
-		if req.TargetKind != kind || policy.Normalize(kind, req.Value) != value {
+		if policy.Normalize(kind, req.Value) != value {
 			continue
 		}
 		if req.Status == store.StatusPending {
@@ -107,25 +112,91 @@ type accessIndex struct {
 	denied  map[string]struct{}
 }
 
+func (a *API) getAccessIndex(r *http.Request, enrollment string) (*accessIndex, error) {
+	enrollment = strings.TrimSpace(enrollment)
+	if enrollment == "" {
+		return &accessIndex{
+			allowed: map[string]struct{}{},
+			pending: map[string]struct{}{},
+			denied:  map[string]struct{}{},
+		}, nil
+	}
+
+	a.accessMu.Lock()
+	if a.accessCache != nil {
+		if hit, ok := a.accessCache[enrollment]; ok && time.Since(hit.at) < accessIndexTTL {
+			idx := hit.idx
+			a.accessMu.Unlock()
+			return idx, nil
+		}
+	}
+	a.accessMu.Unlock()
+
+	idx, err := a.buildAccessIndex(r, enrollment)
+	if err != nil {
+		return nil, err
+	}
+
+	a.accessMu.Lock()
+	if a.accessCache == nil {
+		a.accessCache = map[string]cachedAccessIndex{}
+	}
+	a.accessCache[enrollment] = cachedAccessIndex{at: time.Now(), idx: idx}
+	a.accessMu.Unlock()
+	return idx, nil
+}
+
+func (a *API) invalidateAccessIndex(enrollment string) {
+	a.accessMu.Lock()
+	defer a.accessMu.Unlock()
+	if a.accessCache == nil {
+		return
+	}
+	if enrollment == "" {
+		a.accessCache = map[string]cachedAccessIndex{}
+		return
+	}
+	delete(a.accessCache, enrollment)
+}
+
 func (a *API) buildAccessIndex(r *http.Request, enrollment string) (*accessIndex, error) {
 	idx := &accessIndex{
 		allowed: map[string]struct{}{},
 		pending: map[string]struct{}{},
 		denied:  map[string]struct{}{},
 	}
-	apps, _, err := a.Service.EffectiveAllowlist(r.Context(), enrollment)
-	if err != nil {
-		return nil, err
+
+	var (
+		apps []string
+		reqs []store.Request
+		err1 error
+		err2 error
+		wg   sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var urls []string
+		apps, urls, err1 = a.Service.EffectiveAllowlist(r.Context(), enrollment)
+		_ = urls
+	}()
+	go func() {
+		defer wg.Done()
+		reqs, err2 = a.Store.ListRequestsByEnrollment(r.Context(), enrollment)
+	}()
+	wg.Wait()
+	if err1 != nil {
+		return nil, err1
 	}
+	if err2 != nil {
+		return nil, err2
+	}
+
 	for _, v := range apps {
 		idx.allowed[v] = struct{}{}
 	}
-	reqs, err := a.Store.ListRequests(r.Context(), nil)
-	if err != nil {
-		return nil, err
-	}
 	for _, req := range reqs {
-		if req.EnrollmentID != enrollment || req.Type != store.TypeAccess || req.TargetKind != policy.KindApp {
+		if req.Type != store.TypeAccess || req.TargetKind != policy.KindApp {
 			continue
 		}
 		v := policy.Normalize(policy.KindApp, req.Value)
@@ -155,7 +226,7 @@ func (idx *accessIndex) status(bundleID string) string {
 func (a *API) annotateApps(r *http.Request, list []store.AppMeta, enrollment string) []map[string]any {
 	var idx *accessIndex
 	if enrollment != "" {
-		idx, _ = a.buildAccessIndex(r, enrollment)
+		idx, _ = a.getAccessIndex(r, enrollment)
 	}
 	out := make([]map[string]any, 0, len(list))
 	for _, m := range list {

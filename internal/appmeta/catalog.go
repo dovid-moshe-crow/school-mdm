@@ -5,35 +5,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
-// Catalog searches and caches App Store metadata (DB first, iTunes fallback).
+// Catalog searches App Store metadata via iTunes and caches lookups in the DB.
 type Catalog struct {
 	Store  store.Store
 	Client *http.Client
+	Log    *slog.Logger
 	// Country is the iTunes storefront (default il — Israel).
 	Country string
-	// Lang is the iTunes language tag (default he_il).
+	// Lang is optional iTunes language (only en_us / ja_jp are accepted by Apple).
+	// Hebrew descriptions come from Country=il, not lang.
 	Lang string
-
-	mu     sync.Mutex
-	recent map[string]recentSearch
 }
 
-type recentSearch struct {
-	at   time.Time
-	apps []store.AppMeta
+func (c *Catalog) log() *slog.Logger {
+	if c.Log != nil {
+		return c.Log
+	}
+	return slog.Default()
 }
-
-const recentSearchTTL = 90 * time.Second
 
 func (c *Catalog) httpClient() *http.Client {
 	if c.Client != nil {
@@ -44,7 +43,7 @@ func (c *Catalog) httpClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   4 * time.Second,
 		Transport: transport,
 	}
 }
@@ -60,105 +59,90 @@ func (c *Catalog) lang() string {
 	if c.Lang != "" {
 		return c.Lang
 	}
-	return "he_il"
+	// Empty: omit lang. Apple only accepts en_us / ja_jp; Hebrew comes from country=il.
+	return ""
 }
 
-func (c *Catalog) getRecent(query string) []store.AppMeta {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.recent == nil {
-		return nil
+func effectiveItunesLang(lang string) string {
+	switch lang {
+	case "en_us", "ja_jp":
+		return lang
+	default:
+		return ""
 	}
-	ent, ok := c.recent[query]
-	if !ok || time.Since(ent.at) > recentSearchTTL {
-		return nil
-	}
-	out := make([]store.AppMeta, len(ent.apps))
-	copy(out, ent.apps)
-	return out
 }
 
-func (c *Catalog) putRecent(query string, apps []store.AppMeta) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.recent == nil {
-		c.recent = map[string]recentSearch{}
-	}
-	cp := make([]store.AppMeta, len(apps))
-	copy(cp, apps)
-	c.recent[query] = recentSearch{at: time.Now(), apps: cp}
-}
-
-// Search returns apps matching query. Local DB / memory hits are returned
-// immediately; iTunes is refreshed in the background so the UI stays snappy.
+// Search returns live App Store matches for query (iTunes is the source of truth).
+// Results are upserted into the DB in the background for later lookups — the
+// search response itself is never served from a sticky in-memory/DB-only cache,
+// which previously hid iTunes hits and returned incomplete lists.
 func (c *Catalog) Search(ctx context.Context, query string, limit int) ([]store.AppMeta, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
 	if limit <= 0 || limit > 25 {
-		limit = 12
-	}
-	qKey := strings.ToLower(query)
-
-	if cached := c.getRecent(qKey); len(cached) > 0 {
-		return rankApps(query, cached, limit), nil
+		limit = 25
 	}
 
-	byBundle := map[string]store.AppMeta{}
-	if local, err := c.Store.SearchAppMeta(ctx, query, limit); err == nil {
-		for _, m := range local {
-			m.Source = "cache"
-			byBundle[m.BundleID] = m
-		}
-	}
+	start := time.Now()
+	c.log().Info("app search start",
+		"query", query,
+		"limit", limit,
+		"country", c.country(),
+		"lang", effectiveItunesLang(c.lang()),
+	)
 
-	if len(byBundle) > 0 {
-		out := rankApps(query, mapValues(byBundle), limit)
-		c.putRecent(qKey, out)
-		// Refresh from iTunes without blocking the response.
-		go c.backgroundSearchUpsert(query, limit)
-		return out, nil
-	}
-
-	// Cold path: nothing in DB — wait for iTunes.
 	apps, err := c.searchiTunes(ctx, query, limit)
+	itunesMS := time.Since(start).Milliseconds()
 	if err != nil {
+		c.log().Warn("app search itunes failed",
+			"query", query,
+			"err", err,
+			"itunes_ms", itunesMS,
+		)
+		// Soft fallback: if iTunes is down, show whatever we already know locally.
+		if local, lerr := c.Store.SearchAppMeta(ctx, query, limit); lerr == nil && len(local) > 0 {
+			for i := range local {
+				local[i].Source = "cache"
+			}
+			out := rankApps(query, local, limit)
+			c.log().Info("app search fallback to local cache",
+				"query", query,
+				"results", len(out),
+				"total_ms", time.Since(start).Milliseconds(),
+				"names", appNames(out, 8),
+			)
+			return out, nil
+		}
 		return nil, fmt.Errorf("itunes search: %w", err)
 	}
-	for _, m := range apps {
-		m.Source = "itunes"
-		byBundle[m.BundleID] = m
+	for i := range apps {
+		apps[i].Source = "itunes"
 	}
+	out := rankApps(query, apps, limit)
+	c.log().Info("app search ok",
+		"query", query,
+		"itunes_raw", len(apps),
+		"results", len(out),
+		"itunes_ms", itunesMS,
+		"total_ms", time.Since(start).Milliseconds(),
+		"names", appNames(out, 8),
+	)
 	go c.upsertAll(apps)
-	out := rankApps(query, mapValues(byBundle), limit)
-	c.putRecent(qKey, out)
 	return out, nil
 }
 
-func (c *Catalog) backgroundSearchUpsert(query string, limit int) {
-	bg, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	apps, err := c.searchiTunes(bg, query, limit)
-	if err != nil {
-		return
+func appNames(apps []store.AppMeta, max int) []string {
+	n := len(apps)
+	if n > max {
+		n = max
 	}
-	c.upsertAll(apps)
-	// Refresh in-memory recent so a soft client re-fetch picks up iTunes results.
-	byBundle := map[string]store.AppMeta{}
-	for _, m := range apps {
-		m.Source = "itunes"
-		byBundle[m.BundleID] = m
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, apps[i].Name)
 	}
-	if local, err := c.Store.SearchAppMeta(bg, query, limit); err == nil {
-		for _, m := range local {
-			if _, ok := byBundle[m.BundleID]; !ok {
-				m.Source = "cache"
-				byBundle[m.BundleID] = m
-			}
-		}
-	}
-	c.putRecent(strings.ToLower(query), rankApps(query, mapValues(byBundle), limit))
+	return out
 }
 
 func (c *Catalog) upsertAll(apps []store.AppMeta) {
@@ -178,6 +162,10 @@ func (c *Catalog) LookupBundle(ctx context.Context, bundleID string) (store.AppM
 // LookupBundleOpt loads metadata; when refresh is true always hits iTunes Lookup
 // so the client gets full description / ratings / screenshots (Hebrew storefront).
 func (c *Catalog) LookupBundleOpt(ctx context.Context, bundleID string, refresh bool) (store.AppMeta, error) {
+	return c.lookupBundleOpt(ctx, bundleID, refresh)
+}
+
+func (c *Catalog) lookupBundleOpt(ctx context.Context, bundleID string, refresh bool) (store.AppMeta, error) {
 	bundleID = strings.ToLower(strings.TrimSpace(bundleID))
 	if bundleID == "" {
 		return store.AppMeta{}, fmt.Errorf("bundle_id is required")
@@ -194,7 +182,6 @@ func (c *Catalog) LookupBundleOpt(ctx context.Context, bundleID string, refresh 
 
 	meta, err := c.lookupiTunes(ctx, bundleID)
 	if err != nil {
-		// Fall back to whatever we have cached.
 		if cached, cerr := c.Store.GetAppMeta(ctx, bundleID); cerr == nil {
 			cached.Source = "cache"
 			return cached, nil
@@ -237,9 +224,15 @@ type itunesResult struct {
 }
 
 func (c *Catalog) itunesURL(path string, params url.Values) string {
-	params.Set("country", c.country())
-	params.Set("lang", c.lang())
-	return "https://itunes.apple.com/" + path + "?" + params.Encode()
+	cc := c.country()
+	params.Set("country", cc)
+	// Apple only accepts en_us / ja_jp for lang; he_il etc. return HTTP 400.
+	switch lang := c.lang(); lang {
+	case "en_us", "ja_jp":
+		params.Set("lang", lang)
+	}
+	// Country-prefixed path returns storefront-localized metadata (Hebrew for il).
+	return fmt.Sprintf("https://itunes.apple.com/%s/%s?%s", url.PathEscape(cc), path, params.Encode())
 }
 
 func (c *Catalog) searchiTunes(ctx context.Context, query string, limit int) ([]store.AppMeta, error) {
@@ -360,14 +353,6 @@ func parseInt64(s string) (int64, error) {
 	return n, nil
 }
 
-func mapValues(m map[string]store.AppMeta) []store.AppMeta {
-	out := make([]store.AppMeta, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
-	}
-	return out
-}
-
 func rankApps(query string, apps []store.AppMeta, limit int) []store.AppMeta {
 	q := strings.ToLower(strings.TrimSpace(query))
 	sort.SliceStable(apps, func(i, j int) bool {
@@ -393,7 +378,7 @@ func scoreApp(q string, app store.AppMeta) int {
 	case strings.Contains(bundle, strings.ReplaceAll(q, " ", "")):
 		return 40
 	case strings.Contains(artist, q):
-		return 10 // developer match is weakest — avoids ranking "Google" app for "youtube"
+		return 10
 	default:
 		return 0
 	}

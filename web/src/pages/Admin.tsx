@@ -238,7 +238,6 @@ export default function Admin() {
     queryKey: ['app-search', 'admin-add', debouncedAddAppQ],
     queryFn: () => api.searchApps(debouncedAddAppQ.trim()),
     enabled: addOpen && addKind === 'app' && !!debouncedAddAppQ.trim(),
-    placeholderData: keepPreviousData,
   })
   const addResults = addAppsQuery.data ?? []
 

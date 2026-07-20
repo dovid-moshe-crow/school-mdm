@@ -267,6 +267,32 @@ func (s *Store) ListRequests(ctx context.Context, status *store.RequestStatus) (
 	return out, rows.Err()
 }
 
+func (s *Store) ListRequestsByEnrollment(ctx context.Context, enrollmentID string) ([]store.Request, error) {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return nil, fmt.Errorf("enrollment_id is required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, type, target_kind, value, enrollment_id, reason, status, duration, created_at, decided_at
+		FROM requests WHERE enrollment_id=$1 ORDER BY created_at DESC`, enrollmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.Request
+	for rows.Next() {
+		req, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, req)
+	}
+	if out == nil {
+		out = []store.Request{}
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateRequest(ctx context.Context, req store.Request) error {
 	ct, err := s.pool.Exec(ctx, `
 		UPDATE requests

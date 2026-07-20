@@ -16,7 +16,7 @@ import {
   Tag,
   Typography,
 } from 'antd'
-import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   parseAsBoolean,
   parseAsString,
@@ -237,7 +237,6 @@ export default function Portal() {
     queryKey: ['app-search', deviceId, debouncedQ],
     queryFn: () => api.searchApps(debouncedQ.trim(), deviceId),
     enabled: category === 'access-app' && !bundleId && !!debouncedQ.trim(),
-    placeholderData: keepPreviousData,
   })
   const results = searchQuery.data ?? []
   const searching = searchQuery.isFetching

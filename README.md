@@ -21,7 +21,7 @@ make run
 
 ### Live reload (recommended in your terminal)
 
-Watches the repo and rebuilds/restarts the server when code changes:
+Starts **Vite** (UI with HMR) and **Air** (Go API) together:
 
 ```bash
 export PATH="$HOME/.local/go/bin:$HOME/go/bin:$PATH"
@@ -29,10 +29,12 @@ cd ~/Projects/school-mdm
 make dev
 ```
 
-Then open http://localhost:8080/admin and http://localhost:8080/d/demo-ipad.  
-Leave that terminal open. `Ctrl+C` stops it.
+Then open **http://127.0.0.1:5173** (UI). The API still listens on http://127.0.0.1:8080 — Vite proxies `/api` there.  
+Leave that terminal open. `Ctrl+C` stops both.
 
 (`make dev` installs [Air](https://github.com/air-verse/air) on first run if needed.)
+
+For a production-style embed (built UI served by Go on :8080): `make run` or `make web` then restart the server.
 
 With no `DATABASE_URL`, the server uses an in-memory store.
 

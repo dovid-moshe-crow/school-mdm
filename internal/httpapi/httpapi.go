@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/appmeta"
@@ -25,6 +26,9 @@ type API struct {
 	Store   store.Store
 	Stub    *mdm.StubEnqueuer
 	Log     *slog.Logger
+
+	accessMu    sync.Mutex
+	accessCache map[string]cachedAccessIndex
 }
 
 // Mount registers routes on mux.
@@ -83,20 +87,38 @@ func (a *API) handleAllowlist(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleAppSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
+	enrollment := strings.TrimSpace(r.URL.Query().Get("enrollment_id"))
+	log := a.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Info("GET /api/apps/search", "q", q, "enrollment_id", enrollment)
+
 	if a.Catalog == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "app catalog unavailable"})
 		return
 	}
-	list, err := a.Catalog.Search(r.Context(), q, 12)
+	start := time.Now()
+	list, err := a.Catalog.Search(r.Context(), q, 25)
 	if err != nil {
+		log.Error("app search handler failed", "q", q, "err", err, "ms", time.Since(start).Milliseconds())
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	if list == nil {
 		list = []store.AppMeta{}
 	}
-	enrollment := strings.TrimSpace(r.URL.Query().Get("enrollment_id"))
-	writeJSON(w, http.StatusOK, a.annotateApps(r, list, enrollment))
+	annotateStart := time.Now()
+	out := a.annotateApps(r, list, enrollment)
+	annotateMS := time.Since(annotateStart).Milliseconds()
+	log.Info("GET /api/apps/search done",
+		"q", q,
+		"enrollment_id", enrollment,
+		"results", len(out),
+		"annotate_ms", annotateMS,
+		"ms", time.Since(start).Milliseconds(),
+	)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) handleAppLookup(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +173,7 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp && a.Catalog != nil {
 		_, _ = a.Catalog.LookupBundle(r.Context(), req.Value)
 	}
+	a.invalidateAccessIndex(req.EnrollmentID)
 	writeJSON(w, http.StatusCreated, req)
 }
 
@@ -264,6 +287,7 @@ func (a *API) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeDecideErr(w, err)
 		return
 	}
+	a.invalidateAccessIndex(req.EnrollmentID)
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -277,6 +301,7 @@ func (a *API) handleDeny(w http.ResponseWriter, r *http.Request) {
 		writeDecideErr(w, err)
 		return
 	}
+	a.invalidateAccessIndex(req.EnrollmentID)
 	writeJSON(w, http.StatusOK, req)
 }
 
