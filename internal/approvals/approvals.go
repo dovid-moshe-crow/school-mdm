@@ -18,6 +18,13 @@ type Service struct {
 	Store     store.Store
 	Enqueue   mdm.CommandEnqueuer
 	PortalURL string
+	Credits   CreditSpender // optional; when set, access requests cost credits
+}
+
+// CreditSpender is satisfied by *credits.Service (kept narrow to avoid import cycles).
+type CreditSpender interface {
+	SpendForAccessRequest(ctx context.Context, enrollmentID, requestID string) error
+	RefundForDeniedRequest(ctx context.Context, enrollmentID, requestID string) error
 }
 
 // CreateRequestInput is student-submitted.
@@ -39,6 +46,7 @@ type DecideInput struct {
 }
 
 // CreateRequest stores a pending request and seeds the conversation with the reason.
+// Access requests spend credits after create; on spend failure the request is deleted.
 func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (store.Request, error) {
 	typ, target, value, err := normalizeCreate(in)
 	if err != nil {
@@ -56,6 +64,14 @@ func (s *Service) CreateRequest(ctx context.Context, in CreateRequestInput) (sto
 	if err != nil {
 		return store.Request{}, err
 	}
+
+	if typ == store.TypeAccess && s.Credits != nil {
+		if err := s.Credits.SpendForAccessRequest(ctx, req.EnrollmentID, req.ID); err != nil {
+			_ = s.Store.DeleteRequest(ctx, req.ID)
+			return store.Request{}, err
+		}
+	}
+
 	// Seed the thread only with the student's written reason — never the
 	// target value (bundle id / URL), which is already shown on the ticket.
 	if reason != "" {
@@ -123,6 +139,11 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 		req.Status = store.StatusDenied
 		if err := s.Store.UpdateRequest(ctx, req); err != nil {
 			return store.Request{}, err
+		}
+		if req.Type == store.TypeAccess && s.Credits != nil {
+			if err := s.Credits.RefundForDeniedRequest(ctx, req.EnrollmentID, req.ID); err != nil {
+				return store.Request{}, fmt.Errorf("denied but refund failed: %w", err)
+			}
 		}
 		return req, nil
 	}

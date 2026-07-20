@@ -8,6 +8,7 @@ import {
   Flex,
   Input,
   List,
+  Modal,
   Rate,
   Segmented,
   Skeleton,
@@ -26,7 +27,7 @@ import {
 } from 'nuqs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { api, type AccessStatus, type AppMeta } from '../api'
+import { api, type AccessStatus, type AppMeta, type CreditPackage } from '../api'
 import { RequestThread } from '../components/RequestThread'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he, studentNextAction } from '../he'
@@ -205,6 +206,11 @@ export default function Portal() {
   const [reason, setReason] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [selectedCache, setSelectedCache] = useState<AppMeta | null>(null)
+  const [buyOpen, setBuyOpen] = useState(false)
+  const [payOpen, setPayOpen] = useState(false)
+  const [iframeUrl, setIframeUrl] = useState('')
+  const [pendingPurchaseId, setPendingPurchaseId] = useState('')
+  const [checkingOut, setCheckingOut] = useState(false)
   const debouncedQ = useDebounced(query, 150)
   const debouncedUrl = useDebounced(url, 350)
 
@@ -216,6 +222,22 @@ export default function Portal() {
   }, [category])
 
   const urlPreview = useMemo(() => normalizeHostPreview(url), [url])
+
+  const creditsQuery = useQuery({
+    queryKey: ['credits', deviceId],
+    queryFn: () => api.creditBalance(deviceId),
+    enabled: !!deviceId,
+    refetchInterval: 15_000,
+  })
+  const packagesQuery = useQuery({
+    queryKey: ['credit-packages'],
+    queryFn: () => api.creditPackages(),
+    enabled: buyOpen,
+  })
+  const balance = creditsQuery.data?.available ?? creditsQuery.data?.balance ?? 0
+  const accessCost = creditsQuery.data?.access_cost ?? 1
+  const isAccess = category === 'access-url' || category === 'access-app'
+  const needsCredits = isAccess && balance < accessCost
 
   const mineQuery = useQuery({
     queryKey: ['my-requests', deviceId],
@@ -266,6 +288,11 @@ export default function Portal() {
   }, [bundleId, detailsQuery.data, selectedCache, results])
 
   async function submit() {
+    if (needsCredits) {
+      setBuyOpen(true)
+      message.warning(he.insufficientCredits)
+      return
+    }
     setSubmitting(true)
     try {
       const body: Record<string, string> = { enrollment_id: deviceId, reason }
@@ -287,19 +314,86 @@ export default function Portal() {
       await setParams({ bundle: null, q: '', details: true })
       await setHighlight(created.id)
       await qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
+      await qc.invalidateQueries({ queryKey: ['credits', deviceId] })
       requestAnimationFrame(() => historyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     } catch (err) {
-      message.error((err as Error).message)
+      const msg = (err as Error).message
+      if (/insufficient|קרדיט/i.test(msg)) setBuyOpen(true)
+      message.error(msg)
     } finally {
       setSubmitting(false)
     }
   }
+
+  async function startCheckout(pkg: CreditPackage) {
+    setCheckingOut(true)
+    try {
+      const res = await api.creditCheckout(deviceId, pkg.id)
+      setPendingPurchaseId(res.purchase_id)
+      setIframeUrl(res.iframe_url)
+      setBuyOpen(false)
+      setPayOpen(true)
+    } catch (err) {
+      message.error((err as Error).message)
+    } finally {
+      setCheckingOut(false)
+    }
+  }
+
+  async function finishPayment() {
+    if (!pendingPurchaseId) return
+    try {
+      await api.creditConfirm(deviceId, pendingPurchaseId)
+      message.success(he.paymentSuccess)
+      setPayOpen(false)
+      setIframeUrl('')
+      setPendingPurchaseId('')
+      await qc.invalidateQueries({ queryKey: ['credits', deviceId] })
+    } catch (err) {
+      message.error((err as Error).message || he.paymentPending)
+    }
+  }
+
+  useEffect(() => {
+    function onMessage(ev: MessageEvent) {
+      const data = ev.data as {
+        type?: string
+        Name?: string
+        Value?: { Status?: string; Message?: string }
+        error?: string
+      }
+      if (!data || typeof data !== 'object') return
+      if (data.type === 'nedarim-success' || data.Name === 'TransactionResponse') {
+        if (data.Value?.Status === 'Error') {
+          message.error(data.Value?.Message || he.paymentCancelled)
+          return
+        }
+        void finishPayment()
+        return
+      }
+      if (data.type === 'nedarim-cancel') {
+        message.info(he.paymentCancelled)
+        setPayOpen(false)
+      }
+      if (data.type === 'nedarim-error') {
+        message.error(data.error || he.paymentCancelled)
+        setPayOpen(false)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+    // finishPayment closes over pendingPurchaseId / deviceId
+  }, [pendingPurchaseId, deviceId, message])
 
   const blocked =
     (category === 'access-url' && urlStatus === 'allowed') ||
     (category === 'access-app' && selected?.access_status === 'allowed')
 
   const isMobile = useIsMobile()
+
+  function fmtILS(agorot: number) {
+    return he.priceILS.replace('{n}', (agorot / 100).toFixed(agorot % 100 === 0 ? 0 : 2))
+  }
 
   return (
     <div className="page-shell">
@@ -311,13 +405,35 @@ export default function Portal() {
           <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
             {he.portalLead}
           </Typography.Paragraph>
-          <Tag style={{ maxWidth: '100%', whiteSpace: 'normal', height: 'auto' }}>
-            {he.device}{' '}
-            <Typography.Text code style={{ wordBreak: 'break-all' }}>
-              {deviceId}
-            </Typography.Text>
-          </Tag>
+          <Flex gap={8} wrap="wrap" align="center">
+            <Tag style={{ maxWidth: '100%', whiteSpace: 'normal', height: 'auto' }}>
+              {he.device}{' '}
+              <Typography.Text code style={{ wordBreak: 'break-all' }}>
+                {deviceId}
+              </Typography.Text>
+            </Tag>
+            <Tag color={balance > 0 ? 'success' : 'default'}>
+              {he.availableBalance}: {creditsQuery.isLoading ? '…' : balance}
+            </Tag>
+            <Button size="small" onClick={() => setBuyOpen(true)}>
+              {he.buyCredits}
+            </Button>
+          </Flex>
         </div>
+
+        {needsCredits && (
+          <Alert
+            type="warning"
+            showIcon
+            message={he.insufficientCredits}
+            description={he.insufficientCreditsHint}
+            action={
+              <Button size="small" type="primary" onClick={() => setBuyOpen(true)}>
+                {he.buyCredits}
+              </Button>
+            }
+          />
+        )}
 
         <Card>
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -347,6 +463,11 @@ export default function Portal() {
                   ]}
                 />
               </div>
+              {isAccess && (
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                  {he.accessCostsCredits.replace('{n}', String(accessCost))}
+                </Typography.Text>
+              )}
             </div>
 
             {category === 'access-url' && (
@@ -558,6 +679,56 @@ export default function Portal() {
           </Spin>
         </div>
       </Space>
+
+      <Modal
+        title={he.buyCreditsTitle}
+        open={buyOpen}
+        onCancel={() => setBuyOpen(false)}
+        footer={null}
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary">{he.choosePackage}</Typography.Paragraph>
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          {(packagesQuery.data ?? []).map((pkg) => (
+            <Card key={pkg.id} size="small">
+              <Flex justify="space-between" align="center" gap={12}>
+                <div>
+                  <Typography.Text strong>{pkg.name_he}</Typography.Text>
+                  <div>
+                    <Typography.Text type="secondary">{fmtILS(pkg.price_agorot)}</Typography.Text>
+                  </div>
+                </div>
+                <Button type="primary" loading={checkingOut} onClick={() => void startCheckout(pkg)}>
+                  {he.payNow}
+                </Button>
+              </Flex>
+            </Card>
+          ))}
+          {packagesQuery.isLoading && <Spin />}
+          {!packagesQuery.isLoading && !(packagesQuery.data ?? []).length && (
+            <Empty description={he.choosePackage} />
+          )}
+        </Space>
+      </Modal>
+
+      <Modal
+        title={he.fakeNedarim}
+        open={payOpen}
+        onCancel={() => setPayOpen(false)}
+        footer={null}
+        width={480}
+        destroyOnHidden
+      >
+        {iframeUrl ? (
+          <iframe
+            title="nedarim"
+            src={iframeUrl}
+            style={{ width: '100%', minHeight: 420, border: '1px solid #d7e5dd', borderRadius: 8 }}
+          />
+        ) : (
+          <Spin />
+        )}
+      </Modal>
     </div>
   )
 }

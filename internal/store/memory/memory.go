@@ -24,6 +24,17 @@ type Store struct {
 	groups    map[string]store.Group
 	members   map[string]map[string]struct{} // groupID -> enrollmentID set
 	devices   map[string]string              // enrollmentID -> name
+
+	credits   map[string]store.DeviceCredits
+	ledger    []store.CreditLedgerEntry
+	ledgerKey map[string]struct{} // reason|refType|refID
+	packages  map[string]store.CreditPackage
+	purchases map[string]store.CreditPurchase
+	clientUID map[string]string // clientUniqueID -> purchaseID
+	settings  *store.CreditSettings
+
+	allotmentRules  map[string]store.CreditAllotmentRule
+	allotmentGrants map[string]store.CreditAllotmentGrant // id -> grant
 }
 
 // New creates an empty memory store seeded with essentials as durable entries.
@@ -37,6 +48,14 @@ func New() *Store {
 		groups:    map[string]store.Group{},
 		members:   map[string]map[string]struct{}{},
 		devices:   map[string]string{},
+		credits:         map[string]store.DeviceCredits{},
+		ledger:          nil,
+		ledgerKey:       map[string]struct{}{},
+		packages:        map[string]store.CreditPackage{},
+		purchases:       map[string]store.CreditPurchase{},
+		clientUID:       map[string]string{},
+		allotmentRules:  map[string]store.CreditAllotmentRule{},
+		allotmentGrants: map[string]store.CreditAllotmentGrant{},
 	}
 	for _, app := range policy.Essentials {
 		id := uuid.NewString()
@@ -45,11 +64,26 @@ func New() *Store {
 			ID: id, Kind: policy.KindApp, Value: app, Target: t,
 		}
 	}
+	seedCreditPackages(s)
 	return s
 }
 
+func seedCreditPackages(s *Store) {
+	for _, p := range defaultCreditPackages() {
+		s.packages[p.ID] = p
+	}
+}
+
+func defaultCreditPackages() []store.CreditPackage {
+	return []store.CreditPackage{
+		{ID: "a0000000-0000-4000-8000-000000000010", NameHe: "10 קרדיטים", Credits: 10, PriceAgorot: 1000, Active: true, SortOrder: 10},
+		{ID: "a0000000-0000-4000-8000-000000000050", NameHe: "50 קרדיטים", Credits: 50, PriceAgorot: 4500, Active: true, SortOrder: 20},
+		{ID: "a0000000-0000-4000-8000-000000000100", NameHe: "100 קרדיטים", Credits: 100, PriceAgorot: 8000, Active: true, SortOrder: 30},
+	}
+}
+
 func (s *Store) Ping(context.Context) error { return nil }
-func (s *Store) Kind() string                { return "memory" }
+func (s *Store) Kind() string               { return "memory" }
 
 func (s *Store) ListAllowlist(context.Context) ([]policy.Entry, error) {
 	s.mu.Lock()
@@ -179,6 +213,17 @@ func (s *Store) UpdateRequest(_ context.Context, req store.Request) error {
 		return fmt.Errorf("request %s: %w", req.ID, store.ErrNotFound)
 	}
 	s.requests[req.ID] = req
+	return nil
+}
+
+func (s *Store) DeleteRequest(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.requests[id]; !ok {
+		return fmt.Errorf("request %s: %w", id, store.ErrNotFound)
+	}
+	delete(s.requests, id)
+	delete(s.messages, id)
 	return nil
 }
 

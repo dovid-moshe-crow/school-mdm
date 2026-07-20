@@ -12,6 +12,7 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
+	"github.com/dwdmsh/school-mdm/internal/credits"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
@@ -22,6 +23,7 @@ import (
 type API struct {
 	Cfg     config.Config
 	Service *approvals.Service
+	Credits *credits.Service
 	Catalog *appmeta.Catalog
 	Store   store.Store
 	Stub    *mdm.StubEnqueuer
@@ -60,6 +62,33 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/requests/{id}/approve", a.handleApprove)
 	mux.HandleFunc("POST /api/requests/{id}/deny", a.handleDeny)
 	mux.HandleFunc("GET /api/stub-commands", a.handleStubCommands)
+
+	mux.HandleFunc("GET /api/credits/balance", a.handleCreditBalance)
+	mux.HandleFunc("GET /api/credits/packages", a.handleCreditPackages)
+	mux.HandleFunc("GET /api/credits/settings", a.handleCreditSettings)
+	mux.HandleFunc("POST /api/credits/checkout", a.handleCreditCheckout)
+	mux.HandleFunc("POST /api/credits/confirm", a.handleCreditConfirm)
+	mux.HandleFunc("GET /api/credits/fake-iframe", a.handleFakeIframe)
+	mux.HandleFunc("POST /api/credits/fake-pay", a.handleFakePay)
+	mux.HandleFunc("GET /api/credits/nedarim-bridge", a.handleNedarimBridge)
+	mux.HandleFunc("POST /api/webhooks/nedarim", a.handleNedarimWebhook)
+	mux.HandleFunc("POST /api/webhooks/nedarim/fake", a.handleNedarimWebhook)
+	mux.HandleFunc("POST /api/admin/credits/gift", a.handleAdminGiftCredits)
+	mux.HandleFunc("POST /api/admin/credits/adjust", a.handleAdminAdjustCredits)
+	mux.HandleFunc("GET /api/admin/credits", a.handleAdminListCredits)
+	mux.HandleFunc("GET /api/admin/credits/ledger", a.handleAdminCreditLedger)
+	mux.HandleFunc("GET /api/admin/credits/settings", a.handleAdminGetCreditSettings)
+	mux.HandleFunc("PUT /api/admin/credits/settings", a.handleAdminPutCreditSettings)
+	mux.HandleFunc("GET /api/admin/credits/packages", a.handleAdminListPackages)
+	mux.HandleFunc("POST /api/admin/credits/packages", a.handleAdminCreatePackage)
+	mux.HandleFunc("PUT /api/admin/credits/packages/{id}", a.handleAdminUpdatePackage)
+	mux.HandleFunc("DELETE /api/admin/credits/packages/{id}", a.handleAdminDeletePackage)
+	mux.HandleFunc("GET /api/admin/credits/allotments", a.handleAdminListAllotments)
+	mux.HandleFunc("POST /api/admin/credits/allotments", a.handleAdminCreateAllotment)
+	mux.HandleFunc("PUT /api/admin/credits/allotments/{id}", a.handleAdminUpdateAllotment)
+	mux.HandleFunc("DELETE /api/admin/credits/allotments/{id}", a.handleAdminDeleteAllotment)
+	mux.HandleFunc("POST /api/admin/credits/allotments/run", a.handleAdminRunAllotments)
+
 	mux.Handle("/", webui.Handler())
 }
 
@@ -167,7 +196,11 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		Reason:       body.Reason,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, store.ErrInsufficientCredits) {
+			status = http.StatusPaymentRequired
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 	if req.Type == store.TypeAccess && req.TargetKind == policy.KindApp && a.Catalog != nil {

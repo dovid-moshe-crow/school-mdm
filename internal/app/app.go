@@ -6,13 +6,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
+	"github.com/dwdmsh/school-mdm/internal/credits"
 	"github.com/dwdmsh/school-mdm/internal/httpapi"
 	"github.com/dwdmsh/school-mdm/internal/httpserver"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
+	"github.com/dwdmsh/school-mdm/internal/nedarim"
 	"github.com/dwdmsh/school-mdm/internal/store"
 	"github.com/dwdmsh/school-mdm/internal/store/memory"
 	"github.com/dwdmsh/school-mdm/internal/store/postgres"
@@ -25,6 +28,7 @@ type App struct {
 	Store   store.Store
 	Stub    *mdm.StubEnqueuer
 	Service *approvals.Service
+	Credits *credits.Service
 	Catalog *appmeta.Catalog
 	closer  func()
 }
@@ -55,11 +59,30 @@ func New(ctx context.Context) (*App, error) {
 		log.Info("using memory store (set DATABASE_URL for Neon)")
 	}
 
+	nedarimClient := &nedarim.Client{Cfg: nedarim.Config{
+		Mode:        cfg.NedarimMode,
+		MosadID:     cfg.NedarimMosadID,
+		ApiPassword: cfg.NedarimApiPassword,
+		ApiValid:    cfg.NedarimApiValid,
+		PortalBase:  cfg.PortalBaseURL,
+	}}
+	creditSvc := &credits.Service{
+		Store:       st,
+		Nedarim:     nedarimClient,
+		AccessCost:  cfg.CreditsAccessCost,
+		PortalBase:  cfg.PortalBaseURL,
+		WebhookPath: "/api/webhooks/nedarim",
+	}
+	if err := creditSvc.EnsureSettings(ctx); err != nil {
+		return nil, fmt.Errorf("ensure credit settings: %w", err)
+	}
+
 	stub := &mdm.StubEnqueuer{}
 	svc := &approvals.Service{
 		Store:     st,
 		Enqueue:   stub,
 		PortalURL: cfg.PortalBaseURL,
+		Credits:   creditSvc,
 	}
 	catalog := &appmeta.Catalog{
 		Store:   st,
@@ -68,12 +91,19 @@ func New(ctx context.Context) (*App, error) {
 		Lang:    cfg.ItunesLang,
 	}
 
+	accessCost := creditSvc.AccessRequestCost(ctx)
+	log.Info("credits configured",
+		"nedarim_mode", cfg.NedarimMode,
+		"access_cost", accessCost,
+	)
+
 	return &App{
 		Cfg:     cfg,
 		Log:     log,
 		Store:   st,
 		Stub:    stub,
 		Service: svc,
+		Credits: creditSvc,
 		Catalog: catalog,
 		closer:  closer,
 	}, nil
@@ -92,6 +122,7 @@ func (a *App) Handler() http.Handler {
 	api := &httpapi.API{
 		Cfg:     a.Cfg,
 		Service: a.Service,
+		Credits: a.Credits,
 		Catalog: a.Catalog,
 		Store:   a.Store,
 		Stub:    a.Stub,
@@ -103,6 +134,7 @@ func (a *App) Handler() http.Handler {
 
 // Run listens until ctx is done.
 func (a *App) Run(ctx context.Context) error {
+	go a.Credits.StartAllotmentTicker(ctx, 2*time.Minute, a.Log)
 	srv := httpserver.New(a.Cfg.HTTPAddr, a.Handler(), a.Log)
 	return srv.ListenAndServe(ctx)
 }

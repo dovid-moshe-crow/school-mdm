@@ -100,7 +100,186 @@ type Device struct {
 // AccessRequest is kept as an alias for older call sites.
 type AccessRequest = Request
 
-// Store persists allowlists, grants, requests, groups, and app metadata.
+// LedgerReason classifies a credit balance change.
+type LedgerReason string
+
+const (
+	LedgerPurchase         LedgerReason = "purchase"
+	LedgerSpend            LedgerReason = "spend"
+	LedgerRefund           LedgerReason = "refund"
+	LedgerGift             LedgerReason = "gift"
+	LedgerAdjust           LedgerReason = "adjust"
+	LedgerAllotment        LedgerReason = "allotment"
+	LedgerAllotmentExpire  LedgerReason = "allotment_expire"
+)
+
+// AllotmentInterval is how often a rule refreshes period credits.
+type AllotmentInterval string
+
+const (
+	IntervalDaily   AllotmentInterval = "daily"
+	IntervalWeekly  AllotmentInterval = "weekly"
+	IntervalMonthly AllotmentInterval = "monthly"
+)
+
+// AllotmentTargetType scopes who receives a rule's allotment.
+type AllotmentTargetType string
+
+const (
+	AllotmentEveryone    AllotmentTargetType = "everyone"
+	AllotmentGroup       AllotmentTargetType = "group"
+	AllotmentIndividual  AllotmentTargetType = "individual"
+)
+
+// PurchaseStatus is the lifecycle of a credit purchase.
+type PurchaseStatus string
+
+const (
+	PurchasePending PurchaseStatus = "pending"
+	PurchasePaid    PurchaseStatus = "paid"
+	PurchaseFailed  PurchaseStatus = "failed"
+	PurchaseExpired PurchaseStatus = "expired"
+)
+
+// PaymentProvider identifies who collected the payment.
+type PaymentProvider string
+
+const (
+	ProviderNedarim PaymentProvider = "nedarim"
+	ProviderFake    PaymentProvider = "fake"
+)
+
+// DeviceCredits is the credit balance for one enrollment.
+// Two-bucket model: Balance is permanent (purchase/gift); AllotmentBalance is
+// the current period allotment (resets each period, never stacks). Available()
+// is what the portal shows and what spend checks against.
+type DeviceCredits struct {
+	EnrollmentID      string    `json:"enrollment_id"`
+	Balance           int       `json:"balance"`
+	AllotmentBalance  int       `json:"allotment_balance"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// Available is permanent + period allotment.
+func (d DeviceCredits) Available() int {
+	return d.Balance + d.AllotmentBalance
+}
+
+// CreditAllotmentRule is an admin-configured recurring credit gift.
+type CreditAllotmentRule struct {
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Note       string              `json:"note,omitempty"`
+	Amount     int                 `json:"amount"`
+	Interval   AllotmentInterval   `json:"interval"`
+	TargetType AllotmentTargetType `json:"target_type"`
+	TargetID   string              `json:"target_id"` // group id or enrollment_id
+	Enabled    bool                `json:"enabled"`
+	LastRunAt  *time.Time          `json:"last_run_at,omitempty"`
+	CreatedAt  time.Time           `json:"created_at"`
+	UpdatedAt  time.Time           `json:"updated_at"`
+}
+
+// CreditAllotmentGrant tracks one period's allotment for a rule+enrollment.
+// Remaining is unused allotment still sitting in allotment_balance for clawback.
+type CreditAllotmentGrant struct {
+	ID           string    `json:"id"`
+	RuleID       string    `json:"rule_id"`
+	EnrollmentID string    `json:"enrollment_id"`
+	PeriodKey    string    `json:"period_key"`
+	Amount       int       `json:"amount"`
+	Remaining    int       `json:"remaining"`
+	GrantedAt    time.Time `json:"granted_at"`
+}
+
+// ApplyAllotmentInput grants one period's allotment (idempotent on rule+enrollment+period).
+type ApplyAllotmentInput struct {
+	RuleID       string
+	EnrollmentID string
+	PeriodKey    string
+	Amount       int
+	Note         string
+}
+
+// ApplyAllotmentResult is returned after attempting a period grant.
+type ApplyAllotmentResult struct {
+	Applied  bool
+	Credits  DeviceCredits
+	Expired  int // clawed back from prior period(s) of this rule
+	Granted  int
+	Entry    *CreditLedgerEntry // allotment grant entry when Applied
+}
+
+// CreditLedgerEntry is one immutable balance change.
+type CreditLedgerEntry struct {
+	ID           string       `json:"id"`
+	EnrollmentID string       `json:"enrollment_id"`
+	Delta        int          `json:"delta"`
+	BalanceAfter int          `json:"balance_after"`
+	Reason       LedgerReason `json:"reason"`
+	RefType      string       `json:"ref_type"`
+	RefID        string       `json:"ref_id"`
+	Note         string       `json:"note,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+}
+
+// CreditPackage is a purchasable credit bundle.
+type CreditPackage struct {
+	ID          string `json:"id"`
+	NameHe      string `json:"name_he"`
+	Credits     int    `json:"credits"`
+	PriceAgorot int    `json:"price_agorot"` // ILS agorot (₪1.00 = 100)
+	Active      bool   `json:"active"`
+	SortOrder   int    `json:"sort_order"`
+}
+
+// CreditSettings is the singleton global credits configuration.
+type CreditSettings struct {
+	AccessRequestCost int       `json:"access_request_cost"`
+	Enabled           bool      `json:"enabled"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// CreditPurchase is a checkout intent / paid purchase.
+type CreditPurchase struct {
+	ID             string          `json:"id"`
+	EnrollmentID   string          `json:"enrollment_id"`
+	PackageID      string          `json:"package_id"`
+	Credits        int             `json:"credits"`
+	AmountAgorot   int             `json:"amount_agorot"`
+	Status         PurchaseStatus  `json:"status"`
+	Provider       PaymentProvider `json:"provider"`
+	ProviderTxID   string          `json:"provider_tx_id"`
+	ClientUniqueID string          `json:"client_unique_id"`
+	CreatedAt      time.Time       `json:"created_at"`
+	PaidAt         *time.Time      `json:"paid_at,omitempty"`
+}
+
+// AdjustCreditsInput is a single atomic balance change with ledger row.
+type AdjustCreditsInput struct {
+	EnrollmentID string
+	Delta        int
+	Reason       LedgerReason
+	RefType      string
+	RefID        string
+	Note         string
+}
+
+// AdjustCreditsResult is returned after an atomic credit adjustment.
+type AdjustCreditsResult struct {
+	Balance          int // permanent bucket after change
+	AllotmentBalance int // period bucket after change
+	Entry            CreditLedgerEntry
+	Applied          bool // false when idempotent key already existed
+}
+
+// MarkPurchasePaidInput marks a purchase paid and credits the device.
+type MarkPurchasePaidInput struct {
+	PurchaseID   string
+	ProviderTxID string
+}
+
+// Store persists allowlists, grants, requests, groups, app metadata, and credits.
 type Store interface {
 	Ping(ctx context.Context) error
 	Kind() string
@@ -118,6 +297,7 @@ type Store interface {
 	ListRequests(ctx context.Context, status *RequestStatus) ([]Request, error)
 	ListRequestsByEnrollment(ctx context.Context, enrollmentID string) ([]Request, error)
 	UpdateRequest(ctx context.Context, req Request) error
+	DeleteRequest(ctx context.Context, id string) error
 
 	ListRequestMessages(ctx context.Context, requestID string) ([]RequestMessage, error)
 	AddRequestMessage(ctx context.Context, msg RequestMessage) (RequestMessage, error)
@@ -144,4 +324,34 @@ type Store interface {
 
 	ListDevices(ctx context.Context) ([]Device, error)
 	SetDeviceName(ctx context.Context, enrollmentID, name string) error
+
+	EnsureCreditBalance(ctx context.Context, enrollmentID string) (DeviceCredits, error)
+	GetCreditBalance(ctx context.Context, enrollmentID string) (DeviceCredits, error)
+	AdjustCredits(ctx context.Context, in AdjustCreditsInput) (AdjustCreditsResult, error)
+	ListCreditLedger(ctx context.Context, enrollmentID string, limit int) ([]CreditLedgerEntry, error)
+	ListCreditBalances(ctx context.Context) ([]DeviceCredits, error)
+
+	ListCreditPackages(ctx context.Context, activeOnly bool) ([]CreditPackage, error)
+	GetCreditPackage(ctx context.Context, id string) (CreditPackage, error)
+	CreateCreditPackage(ctx context.Context, p CreditPackage) (CreditPackage, error)
+	UpdateCreditPackage(ctx context.Context, p CreditPackage) (CreditPackage, error)
+
+	GetCreditSettings(ctx context.Context) (CreditSettings, error)
+	UpsertCreditSettings(ctx context.Context, settings CreditSettings) (CreditSettings, error)
+
+	CreateCreditPurchase(ctx context.Context, p CreditPurchase) (CreditPurchase, error)
+	GetCreditPurchase(ctx context.Context, id string) (CreditPurchase, error)
+	GetCreditPurchaseByClientUnique(ctx context.Context, clientUniqueID string) (CreditPurchase, error)
+	MarkPurchasePaid(ctx context.Context, in MarkPurchasePaidInput) (CreditPurchase, bool, error)
+
+	ListAllotmentRules(ctx context.Context) ([]CreditAllotmentRule, error)
+	GetAllotmentRule(ctx context.Context, id string) (CreditAllotmentRule, error)
+	CreateAllotmentRule(ctx context.Context, rule CreditAllotmentRule) (CreditAllotmentRule, error)
+	UpdateAllotmentRule(ctx context.Context, rule CreditAllotmentRule) (CreditAllotmentRule, error)
+	DeleteAllotmentRule(ctx context.Context, id string) error
+	TouchAllotmentRuleRun(ctx context.Context, id string, at time.Time) error
+
+	// ApplyAllotmentPeriod expires unused prior-period allotment for this rule,
+	// then grants Amount into allotment_balance. Idempotent on rule+enrollment+period.
+	ApplyAllotmentPeriod(ctx context.Context, in ApplyAllotmentInput) (ApplyAllotmentResult, error)
 }

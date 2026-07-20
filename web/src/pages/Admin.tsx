@@ -9,13 +9,16 @@ import {
   Empty,
   Flex,
   Input,
+  InputNumber,
   List,
+  Modal,
   Row,
   Segmented,
   Select,
   Skeleton,
   Space,
   Spin,
+  Switch,
   Tabs,
   Tag,
   Typography,
@@ -28,16 +31,33 @@ import {
   useQueryStates,
 } from 'nuqs'
 import { useEffect, useMemo, useState } from 'react'
-import { api, type Allowance, type AppMeta, type Device, type Group, type Request } from '../api'
+import {
+  api,
+  type Allowance,
+  type AllotmentInterval,
+  type AllotmentTargetType,
+  type AppMeta,
+  type CreditAllotmentRule,
+  type CreditLedgerEntry,
+  type CreditPackage,
+  type Device,
+  type Group,
+  type Request,
+} from '../api'
 import { RequestThread } from '../components/RequestThread'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he, statusClass, adminNextAction } from '../he'
 import { AppThumb, useDebounced } from '../ui'
 
-const tabKeys = ['requests', 'groups', 'allowances', 'devices'] as const
+const tabKeys = ['requests', 'groups', 'allowances', 'devices', 'credits'] as const
 type TabKey = (typeof tabKeys)[number]
 
 const allowScopes = ['global', 'group', 'device', 'all'] as const
+
+const EMPTY_REQUESTS: Request[] = []
+const EMPTY_GROUPS: Group[] = []
+const EMPTY_DEVICES: Device[] = []
+const EMPTY_ALLOWANCES: Allowance[] = []
 
 function labelDevice(d: Device | string, devices: Device[]) {
   if (typeof d === 'string') {
@@ -159,6 +179,31 @@ export default function Admin() {
   const [addAppQ, setAddAppQ] = useState('')
   const debouncedAddAppQ = useDebounced(addAppQ, 320)
   const [addApp, setAddApp] = useState<AppMeta | null>(null)
+  const [giftDevice, setGiftDevice] = useState('')
+  const [giftAmount, setGiftAmount] = useState('10')
+  const [giftNote, setGiftNote] = useState('')
+  const [gifting, setGifting] = useState(false)
+  const [accessCostDraft, setAccessCostDraft] = useState<number | null>(null)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [pkgModalOpen, setPkgModalOpen] = useState(false)
+  const [editingPkg, setEditingPkg] = useState<CreditPackage | null>(null)
+  const [pkgName, setPkgName] = useState('')
+  const [pkgCredits, setPkgCredits] = useState(10)
+  const [pkgPriceIls, setPkgPriceIls] = useState(10)
+  const [pkgSort, setPkgSort] = useState(10)
+  const [pkgActive, setPkgActive] = useState(true)
+  const [savingPkg, setSavingPkg] = useState(false)
+  const [allotModalOpen, setAllotModalOpen] = useState(false)
+  const [editingAllot, setEditingAllot] = useState<CreditAllotmentRule | null>(null)
+  const [allotName, setAllotName] = useState('')
+  const [allotNote, setAllotNote] = useState('')
+  const [allotAmount, setAllotAmount] = useState(5)
+  const [allotInterval, setAllotInterval] = useState<AllotmentInterval>('daily')
+  const [allotTargetType, setAllotTargetType] = useState<AllotmentTargetType>('everyone')
+  const [allotTargetID, setAllotTargetID] = useState('')
+  const [allotEnabled, setAllotEnabled] = useState(true)
+  const [savingAllot, setSavingAllot] = useState(false)
+  const [runningAllot, setRunningAllot] = useState(false)
 
   const devicesQuery = useQuery({
     queryKey: ['devices'],
@@ -168,8 +213,105 @@ export default function Admin() {
     queryKey: ['groups'],
     queryFn: () => api.groups(),
   })
-  const devices = devicesQuery.data ?? []
-  const groups = groupsQuery.data ?? []
+  const creditSettingsQuery = useQuery({
+    queryKey: ['admin-credit-settings'],
+    queryFn: () => api.adminCreditSettings(),
+    enabled: tab === 'credits',
+  })
+  const creditPackagesQuery = useQuery({
+    queryKey: ['admin-credit-packages'],
+    queryFn: () => api.adminCreditPackages(),
+    enabled: tab === 'credits',
+  })
+  const allotmentsQuery = useQuery({
+    queryKey: ['admin-credit-allotments'],
+    queryFn: () => api.adminAllotments(),
+    enabled: tab === 'credits',
+  })
+  const creditDeviceQuery = useQuery({
+    queryKey: ['admin-credit-device', giftDevice],
+    queryFn: () => api.adminCreditDevice(giftDevice),
+    enabled: tab === 'credits' && !!giftDevice,
+  })
+  const devices = devicesQuery.data ?? EMPTY_DEVICES
+  const groups = groupsQuery.data ?? EMPTY_GROUPS
+
+  useEffect(() => {
+    if (creditSettingsQuery.data && accessCostDraft === null) {
+      setAccessCostDraft(creditSettingsQuery.data.access_request_cost)
+    }
+  }, [creditSettingsQuery.data, accessCostDraft])
+
+  function openPackageModal(pkg?: CreditPackage) {
+    if (pkg) {
+      setEditingPkg(pkg)
+      setPkgName(pkg.name_he)
+      setPkgCredits(pkg.credits)
+      setPkgPriceIls(pkg.price_agorot / 100)
+      setPkgSort(pkg.sort_order)
+      setPkgActive(pkg.active)
+    } else {
+      setEditingPkg(null)
+      setPkgName('')
+      setPkgCredits(10)
+      setPkgPriceIls(10)
+      setPkgSort(40)
+      setPkgActive(true)
+    }
+    setPkgModalOpen(true)
+  }
+
+  function openAllotmentModal(rule?: CreditAllotmentRule) {
+    if (rule) {
+      setEditingAllot(rule)
+      setAllotName(rule.name || '')
+      setAllotNote(rule.note || '')
+      setAllotAmount(rule.amount)
+      setAllotInterval(rule.interval)
+      setAllotTargetType(rule.target_type)
+      setAllotTargetID(rule.target_id || '')
+      setAllotEnabled(rule.enabled)
+    } else {
+      setEditingAllot(null)
+      setAllotName('')
+      setAllotNote('')
+      setAllotAmount(5)
+      setAllotInterval('daily')
+      setAllotTargetType('everyone')
+      setAllotTargetID('')
+      setAllotEnabled(true)
+    }
+    setAllotModalOpen(true)
+  }
+
+  function allotmentTargetLabel(rule: CreditAllotmentRule) {
+    if (rule.target_type === 'everyone') return he.allotmentTargetEveryone
+    if (rule.target_type === 'group') {
+      const g = groups.find((x) => x.id === rule.target_id)
+      return `${he.allotmentTargetGroup}: ${g?.name || rule.target_id}`
+    }
+    const d = devices.find((x) => x.enrollment_id === rule.target_id)
+    return `${he.allotmentTargetIndividual}: ${d ? labelDevice(d, devices) : rule.target_id}`
+  }
+
+  function allotmentIntervalLabel(interval: string) {
+    if (interval === 'weekly') return he.allotmentIntervalWeekly
+    if (interval === 'monthly') return he.allotmentIntervalMonthly
+    return he.allotmentIntervalDaily
+  }
+
+  function ledgerReasonLabel(reason: string) {
+    const map: Record<string, string> = {
+      gift: 'הענקה',
+      adjust: 'התאמה',
+      purchase: 'רכישה',
+      spend: 'חיוב',
+      refund: 'החזר',
+      allotment: 'הקצאה תקופתית',
+      allotment_expire: 'פקיעת הקצאה',
+    }
+    return map[reason] || reason
+  }
 
   const pendingQuery = useQuery({
     queryKey: ['requests', 'pending-count'],
@@ -195,7 +337,7 @@ export default function Admin() {
     enabled: tab === 'requests',
     placeholderData: keepPreviousData,
   })
-  const requests = requestsQuery.data ?? []
+  const requests = requestsQuery.data ?? EMPTY_REQUESTS
 
   const allowancesEnabled =
     tab === 'allowances' &&
@@ -225,8 +367,8 @@ export default function Admin() {
     tab === 'allowances' &&
     ((allowFilters.ascope === 'device' && !allowFilters.adevice) ||
       (allowFilters.ascope === 'group' && !allowFilters.agroup))
-      ? []
-      : (allowancesQuery.data ?? [])
+      ? EMPTY_ALLOWANCES
+      : (allowancesQuery.data ?? EMPTY_ALLOWANCES)
 
   const membersQuery = useQuery({
     queryKey: ['group-members', selectedGroupId],
@@ -259,22 +401,31 @@ export default function Admin() {
 
   useEffect(() => {
     setApproveScope((prev) => {
+      let changed = false
       const next = { ...prev }
       for (const r of requests) {
-        if (!next[r.id]) next[r.id] = 'device'
+        if (!next[r.id]) {
+          next[r.id] = 'device'
+          changed = true
+        }
       }
-      return next
+      return changed ? next : prev
     })
   }, [requests])
 
   useEffect(() => {
     if (groups.length !== 1) return
+    const onlyGroupId = groups[0].id
     setApproveGroup((prev) => {
+      let changed = false
       const next = { ...prev }
       for (const r of requests) {
-        if (!next[r.id]) next[r.id] = groups[0].id
+        if (!next[r.id]) {
+          next[r.id] = onlyGroupId
+          changed = true
+        }
       }
-      return next
+      return changed ? next : prev
     })
   }, [groups, requests])
 
@@ -354,7 +505,7 @@ export default function Admin() {
   }
 
   const metaLoading =
-    (tab === 'groups' || tab === 'devices') &&
+    (tab === 'groups' || tab === 'devices' || tab === 'credits') &&
     (devicesQuery.isLoading || groupsQuery.isLoading)
   const requestsLoading = tab === 'requests' && requestsQuery.isLoading && !requestsQuery.data
   const requestsFetching = tab === 'requests' && requestsQuery.isFetching
@@ -1227,8 +1378,614 @@ export default function Admin() {
                       <Typography.Text code style={{ marginTop: 8, display: 'block' }}>
                         {d.enrollment_id}
                       </Typography.Text>
+                      <Button
+                        size="small"
+                        style={{ marginTop: 8 }}
+                        onClick={() => {
+                          setGiftDevice(d.enrollment_id)
+                          void setTab('credits')
+                        }}
+                      >
+                        {he.goToCredits}
+                      </Button>
                     </Card>
                   ))}
+                </Space>
+              ),
+            },
+            {
+              key: 'credits',
+              label: he.tabCredits,
+              children: metaLoading ? (
+                <LoadingBlock />
+              ) : (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Card size="small" title={he.creditSettings}>
+                    <Space direction="vertical" style={{ width: '100%' }} size="small">
+                      <Typography.Text type="secondary">{he.accessRequestCostHint}</Typography.Text>
+                      <Typography.Text type="secondary">{he.accessRequestCost}</Typography.Text>
+                      <InputNumber
+                        style={{ width: '100%', marginTop: 4 }}
+                        min={1}
+                        value={accessCostDraft ?? creditSettingsQuery.data?.access_request_cost ?? 1}
+                        onChange={(v) => setAccessCostDraft(typeof v === 'number' ? v : 1)}
+                      />
+                      <Button
+                        type="primary"
+                        loading={savingSettings}
+                        disabled={!accessCostDraft || accessCostDraft < 1}
+                        onClick={async () => {
+                          if (!accessCostDraft || accessCostDraft < 1) return
+                          setSavingSettings(true)
+                          try {
+                            await api.adminUpdateCreditSettings(accessCostDraft)
+                            message.success(he.settingsSaved)
+                            void qc.invalidateQueries({ queryKey: ['admin-credit-settings'] })
+                          } catch (err) {
+                            message.error((err as Error).message)
+                          } finally {
+                            setSavingSettings(false)
+                          }
+                        }}
+                      >
+                        {he.save}
+                      </Button>
+                    </Space>
+                  </Card>
+
+                  <Card
+                    size="small"
+                    title={he.allotmentRules}
+                    extra={
+                      <Space>
+                        <Button
+                          size="small"
+                          loading={runningAllot}
+                          onClick={async () => {
+                            setRunningAllot(true)
+                            try {
+                              const res = await api.adminRunAllotments()
+                              message.success(
+                                `${he.allotmentRunOk} · ${res.grants_applied}/${res.grants_skipped + res.grants_applied}`,
+                              )
+                              void qc.invalidateQueries({ queryKey: ['admin-credit-allotments'] })
+                              if (giftDevice) {
+                                void qc.invalidateQueries({
+                                  queryKey: ['admin-credit-device', giftDevice],
+                                })
+                              }
+                            } catch (err) {
+                              message.error((err as Error).message)
+                            } finally {
+                              setRunningAllot(false)
+                            }
+                          }}
+                        >
+                          {he.allotmentRunNow}
+                        </Button>
+                        <Button size="small" type="primary" onClick={() => openAllotmentModal()}>
+                          {he.newAllotment}
+                        </Button>
+                      </Space>
+                    }
+                  >
+                    <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+                      {he.allotmentRulesHint}
+                    </Typography.Text>
+                    {allotmentsQuery.isLoading ? (
+                      <Skeleton active paragraph={{ rows: 3 }} />
+                    ) : !(allotmentsQuery.data ?? []).length ? (
+                      <Empty description={he.emptyAllow} />
+                    ) : (
+                      <Space direction="vertical" style={{ width: '100%' }} size="small">
+                        {(allotmentsQuery.data ?? []).map((rule) => (
+                          <Card key={rule.id} size="small" type="inner">
+                            <Flex justify="space-between" align="flex-start" gap={12} wrap="wrap">
+                              <div>
+                                <Typography.Text strong>
+                                  {rule.name || he.allotmentRules}
+                                </Typography.Text>
+                                <div>
+                                  <Typography.Text type="secondary">
+                                    {he.packageCredits.replace('{n}', String(rule.amount))} ·{' '}
+                                    {allotmentIntervalLabel(rule.interval)} ·{' '}
+                                    {allotmentTargetLabel(rule)}
+                                  </Typography.Text>
+                                </div>
+                                <Space size={4} wrap style={{ marginTop: 6 }}>
+                                  <Tag color={rule.enabled ? 'success' : 'default'}>
+                                    {rule.enabled ? he.allotmentEnabled : he.allotmentDisabled}
+                                  </Tag>
+                                  {rule.period_key && (
+                                    <Tag>
+                                      {he.allotmentPeriodKey}: {rule.period_key}
+                                    </Tag>
+                                  )}
+                                </Space>
+                                <div style={{ marginTop: 6 }}>
+                                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                    {he.allotmentLastRun}:{' '}
+                                    {rule.last_run_at
+                                      ? new Date(rule.last_run_at).toLocaleString('he-IL')
+                                      : '—'}
+                                    {rule.next_period_at
+                                      ? ` · ${he.allotmentNextPeriod}: ${new Date(rule.next_period_at).toLocaleString('he-IL')}`
+                                      : ''}
+                                  </Typography.Text>
+                                </div>
+                              </div>
+                              <Space>
+                                <Button size="small" onClick={() => openAllotmentModal(rule)}>
+                                  {he.editAllotment}
+                                </Button>
+                                <Button
+                                  size="small"
+                                  onClick={async () => {
+                                    try {
+                                      await api.adminUpdateAllotment(rule.id, {
+                                        enabled: !rule.enabled,
+                                      })
+                                      message.success(he.allotmentSaved)
+                                      void qc.invalidateQueries({
+                                        queryKey: ['admin-credit-allotments'],
+                                      })
+                                    } catch (err) {
+                                      message.error((err as Error).message)
+                                    }
+                                  }}
+                                >
+                                  {rule.enabled ? he.allotmentDisabled : he.allotmentEnabled}
+                                </Button>
+                                <Button
+                                  size="small"
+                                  danger
+                                  onClick={() => {
+                                    modal.confirm({
+                                      title: he.allotmentDeleteConfirm,
+                                      okText: he.delete,
+                                      cancelText: he.close,
+                                      onOk: async () => {
+                                        try {
+                                          await api.adminDeleteAllotment(rule.id)
+                                          message.success(he.allotmentDeleted)
+                                          void qc.invalidateQueries({
+                                            queryKey: ['admin-credit-allotments'],
+                                          })
+                                        } catch (err) {
+                                          message.error((err as Error).message)
+                                        }
+                                      },
+                                    })
+                                  }}
+                                >
+                                  {he.delete}
+                                </Button>
+                              </Space>
+                            </Flex>
+                          </Card>
+                        ))}
+                      </Space>
+                    )}
+                  </Card>
+
+                  <Card
+                    size="small"
+                    title={he.creditPackagesAdmin}
+                    extra={
+                      <Button size="small" type="primary" onClick={() => openPackageModal()}>
+                        {he.newPackage}
+                      </Button>
+                    }
+                  >
+                    {creditPackagesQuery.isLoading ? (
+                      <Skeleton active paragraph={{ rows: 3 }} />
+                    ) : !(creditPackagesQuery.data ?? []).length ? (
+                      <Empty description={he.emptyAllow} />
+                    ) : (
+                      <Space direction="vertical" style={{ width: '100%' }} size="small">
+                        {(creditPackagesQuery.data ?? []).map((pkg) => (
+                          <Card key={pkg.id} size="small" type="inner">
+                            <Flex justify="space-between" align="flex-start" gap={12} wrap="wrap">
+                              <div>
+                                <Typography.Text strong>{pkg.name_he}</Typography.Text>
+                                <div>
+                                  <Typography.Text type="secondary">
+                                    {he.packageCredits.replace('{n}', String(pkg.credits))} ·{' '}
+                                    {he.priceILS.replace(
+                                      '{n}',
+                                      (pkg.price_agorot / 100).toFixed(
+                                        pkg.price_agorot % 100 === 0 ? 0 : 2,
+                                      ),
+                                    )}{' '}
+                                    · #{pkg.sort_order}
+                                  </Typography.Text>
+                                </div>
+                                <Tag color={pkg.active ? 'success' : 'default'} style={{ marginTop: 6 }}>
+                                  {pkg.active ? he.packageActive : he.packageInactive}
+                                </Tag>
+                              </div>
+                              <Space>
+                                <Button size="small" onClick={() => openPackageModal(pkg)}>
+                                  {he.editPackage}
+                                </Button>
+                                {pkg.active && (
+                                  <Button
+                                    size="small"
+                                    danger
+                                    onClick={() => {
+                                      modal.confirm({
+                                        title: he.deactivatePackageConfirm,
+                                        okText: he.deactivatePackage,
+                                        cancelText: he.close,
+                                        onOk: async () => {
+                                          try {
+                                            await api.adminDeactivateCreditPackage(pkg.id)
+                                            message.success(he.packageSaved)
+                                            void qc.invalidateQueries({
+                                              queryKey: ['admin-credit-packages'],
+                                            })
+                                          } catch (err) {
+                                            message.error((err as Error).message)
+                                          }
+                                        },
+                                      })
+                                    }}
+                                  >
+                                    {he.deactivatePackage}
+                                  </Button>
+                                )}
+                              </Space>
+                            </Flex>
+                          </Card>
+                        ))}
+                      </Space>
+                    )}
+                  </Card>
+
+                  <Card size="small" title={he.adjustCredits}>
+                    <Space direction="vertical" style={{ width: '100%' }} size="small">
+                      <Select
+                        style={{ width: '100%' }}
+                        placeholder={he.device}
+                        value={giftDevice || undefined}
+                        onChange={setGiftDevice}
+                        options={devices.map((d) => ({
+                          value: d.enrollment_id,
+                          label: labelDevice(d, devices),
+                        }))}
+                        showSearch
+                        optionFilterProp="label"
+                        allowClear
+                      />
+                      <Typography.Text type="secondary">{he.adjustAmountHint}</Typography.Text>
+                      <Space.Compact style={{ width: '100%' }}>
+                        <Input
+                          style={{ width: 'auto' }}
+                          value={he.adjustAmount}
+                          disabled
+                        />
+                        <Input
+                          type="number"
+                          value={giftAmount}
+                          onChange={(e) => setGiftAmount(e.target.value)}
+                          style={{ width: '100%' }}
+                        />
+                      </Space.Compact>
+                      <Input
+                        value={giftNote}
+                        onChange={(e) => setGiftNote(e.target.value)}
+                        placeholder={he.giftNote}
+                      />
+                      <Button
+                        type="primary"
+                        loading={gifting}
+                        disabled={!giftDevice || Number(giftAmount) === 0 || Number.isNaN(Number(giftAmount))}
+                        onClick={async () => {
+                          setGifting(true)
+                          try {
+                            const res = await api.adminAdjustCredits(
+                              giftDevice,
+                              Number(giftAmount),
+                              giftNote,
+                            )
+                            message.success(
+                              `${he.adjustOk} · ${he.availableBalance}: ${res.available ?? res.balance}`,
+                            )
+                            setGiftNote('')
+                            void qc.invalidateQueries({
+                              queryKey: ['admin-credit-device', giftDevice],
+                            })
+                          } catch (err) {
+                            message.error((err as Error).message)
+                          } finally {
+                            setGifting(false)
+                          }
+                        }}
+                      >
+                        {he.adjustCredits}
+                      </Button>
+                      {giftDevice && creditDeviceQuery.isLoading && <Skeleton active paragraph={{ rows: 2 }} />}
+                      {giftDevice && creditDeviceQuery.data && (
+                        <Card size="small" type="inner" title={he.lookupDevice}>
+                          <Space direction="vertical" size={4}>
+                            <Typography.Text>
+                              {he.availableBalance}:{' '}
+                              <Typography.Text strong>
+                                {creditDeviceQuery.data.available ??
+                                  creditDeviceQuery.data.balance +
+                                    (creditDeviceQuery.data.allotment_balance ?? 0)}
+                              </Typography.Text>
+                            </Typography.Text>
+                            <Typography.Text type="secondary">
+                              {he.permanentBalance}: {creditDeviceQuery.data.balance} ·{' '}
+                              {he.allotmentBalance}:{' '}
+                              {creditDeviceQuery.data.allotment_balance ?? 0}
+                            </Typography.Text>
+                          </Space>
+                          <Typography.Paragraph strong style={{ marginTop: 12, marginBottom: 8 }}>
+                            {he.recentLedger}
+                          </Typography.Paragraph>
+                          {!(creditDeviceQuery.data.ledger ?? []).length ? (
+                            <Empty description={he.ledgerEmpty} />
+                          ) : (
+                            <List
+                              size="small"
+                              dataSource={creditDeviceQuery.data.ledger}
+                              renderItem={(entry: CreditLedgerEntry) => (
+                                <List.Item>
+                                  <List.Item.Meta
+                                    title={
+                                      <Flex gap={8} wrap="wrap">
+                                        <Tag>{ledgerReasonLabel(entry.reason)}</Tag>
+                                        <Typography.Text
+                                          type={entry.delta >= 0 ? 'success' : 'danger'}
+                                        >
+                                          {entry.delta >= 0 ? '+' : ''}
+                                          {entry.delta}
+                                        </Typography.Text>
+                                        <Typography.Text type="secondary">
+                                          → {entry.balance_after}
+                                        </Typography.Text>
+                                      </Flex>
+                                    }
+                                    description={
+                                      <>
+                                        {entry.note ? `${entry.note} · ` : ''}
+                                        {new Date(entry.created_at).toLocaleString('he-IL')}
+                                      </>
+                                    }
+                                  />
+                                </List.Item>
+                              )}
+                            />
+                          )}
+                        </Card>
+                      )}
+                    </Space>
+                  </Card>
+
+                  <Modal
+                    title={editingPkg ? he.editPackage : he.newPackage}
+                    open={pkgModalOpen}
+                    onCancel={() => setPkgModalOpen(false)}
+                    confirmLoading={savingPkg}
+                    okText={he.save}
+                    cancelText={he.close}
+                    onOk={async () => {
+                      const priceAgorot = Math.round(pkgPriceIls * 100)
+                      if (!pkgName.trim() || pkgCredits < 1 || priceAgorot < 1) {
+                        message.error(he.packageName)
+                        return
+                      }
+                      setSavingPkg(true)
+                      try {
+                        if (editingPkg) {
+                          await api.adminUpdateCreditPackage(editingPkg.id, {
+                            name_he: pkgName.trim(),
+                            credits: pkgCredits,
+                            price_agorot: priceAgorot,
+                            active: pkgActive,
+                            sort_order: pkgSort,
+                          })
+                        } else {
+                          await api.adminCreateCreditPackage({
+                            name_he: pkgName.trim(),
+                            credits: pkgCredits,
+                            price_agorot: priceAgorot,
+                            active: pkgActive,
+                            sort_order: pkgSort,
+                          })
+                        }
+                        message.success(he.packageSaved)
+                        setPkgModalOpen(false)
+                        void qc.invalidateQueries({ queryKey: ['admin-credit-packages'] })
+                      } catch (err) {
+                        message.error((err as Error).message)
+                      } finally {
+                        setSavingPkg(false)
+                      }
+                    }}
+                  >
+                    <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                      <div>
+                        <Typography.Text type="secondary">{he.packageName}</Typography.Text>
+                        <Input
+                          style={{ marginTop: 4 }}
+                          value={pkgName}
+                          onChange={(e) => setPkgName(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.packageCreditsAmount}</Typography.Text>
+                        <InputNumber
+                          style={{ width: '100%', marginTop: 4 }}
+                          min={1}
+                          value={pkgCredits}
+                          onChange={(v) => setPkgCredits(typeof v === 'number' ? v : 1)}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.packagePriceILS}</Typography.Text>
+                        <InputNumber
+                          style={{ width: '100%', marginTop: 4 }}
+                          min={0.01}
+                          step={0.5}
+                          value={pkgPriceIls}
+                          onChange={(v) => setPkgPriceIls(typeof v === 'number' ? v : 1)}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.packageSort}</Typography.Text>
+                        <InputNumber
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={pkgSort}
+                          onChange={(v) => setPkgSort(typeof v === 'number' ? v : 0)}
+                        />
+                      </div>
+                      <Flex align="center" gap={8}>
+                        <Switch checked={pkgActive} onChange={setPkgActive} />
+                        <Typography.Text>
+                          {pkgActive ? he.packageActive : he.packageInactive}
+                        </Typography.Text>
+                      </Flex>
+                    </Space>
+                  </Modal>
+
+                  <Modal
+                    title={editingAllot ? he.editAllotment : he.newAllotment}
+                    open={allotModalOpen}
+                    onCancel={() => setAllotModalOpen(false)}
+                    confirmLoading={savingAllot}
+                    okText={he.save}
+                    cancelText={he.close}
+                    onOk={async () => {
+                      if (allotAmount < 1) {
+                        message.error(he.allotmentAmount)
+                        return
+                      }
+                      if (
+                        (allotTargetType === 'group' || allotTargetType === 'individual') &&
+                        !allotTargetID.trim()
+                      ) {
+                        message.error(he.allotmentTarget)
+                        return
+                      }
+                      setSavingAllot(true)
+                      try {
+                        const payload = {
+                          name: allotName.trim(),
+                          note: allotNote.trim(),
+                          amount: allotAmount,
+                          interval: allotInterval,
+                          target_type: allotTargetType,
+                          target_id:
+                            allotTargetType === 'everyone' ? '' : allotTargetID.trim(),
+                          enabled: allotEnabled,
+                        }
+                        if (editingAllot) {
+                          await api.adminUpdateAllotment(editingAllot.id, payload)
+                        } else {
+                          await api.adminCreateAllotment(payload)
+                        }
+                        message.success(he.allotmentSaved)
+                        setAllotModalOpen(false)
+                        void qc.invalidateQueries({ queryKey: ['admin-credit-allotments'] })
+                      } catch (err) {
+                        message.error((err as Error).message)
+                      } finally {
+                        setSavingAllot(false)
+                      }
+                    }}
+                  >
+                    <Space direction="vertical" style={{ width: '100%' }} size="middle">
+                      <div>
+                        <Typography.Text type="secondary">{he.allotmentName}</Typography.Text>
+                        <Input
+                          style={{ marginTop: 4 }}
+                          value={allotName}
+                          onChange={(e) => setAllotName(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.allotmentAmount}</Typography.Text>
+                        <InputNumber
+                          style={{ width: '100%', marginTop: 4 }}
+                          min={1}
+                          value={allotAmount}
+                          onChange={(v) => setAllotAmount(typeof v === 'number' ? v : 1)}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.allotmentInterval}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={allotInterval}
+                          onChange={setAllotInterval}
+                          options={[
+                            { value: 'daily', label: he.allotmentIntervalDaily },
+                            { value: 'weekly', label: he.allotmentIntervalWeekly },
+                            { value: 'monthly', label: he.allotmentIntervalMonthly },
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <Typography.Text type="secondary">{he.allotmentTarget}</Typography.Text>
+                        <Select
+                          style={{ width: '100%', marginTop: 4 }}
+                          value={allotTargetType}
+                          onChange={(v) => {
+                            setAllotTargetType(v)
+                            setAllotTargetID('')
+                          }}
+                          options={[
+                            { value: 'everyone', label: he.allotmentTargetEveryone },
+                            { value: 'group', label: he.allotmentTargetGroup },
+                            { value: 'individual', label: he.allotmentTargetIndividual },
+                          ]}
+                        />
+                      </div>
+                      {allotTargetType === 'group' && (
+                        <Select
+                          style={{ width: '100%' }}
+                          placeholder={he.group}
+                          value={allotTargetID || undefined}
+                          onChange={setAllotTargetID}
+                          options={groups.map((g) => ({ value: g.id, label: g.name }))}
+                          showSearch
+                          optionFilterProp="label"
+                        />
+                      )}
+                      {allotTargetType === 'individual' && (
+                        <Select
+                          style={{ width: '100%' }}
+                          placeholder={he.device}
+                          value={allotTargetID || undefined}
+                          onChange={setAllotTargetID}
+                          options={devices.map((d) => ({
+                            value: d.enrollment_id,
+                            label: labelDevice(d, devices),
+                          }))}
+                          showSearch
+                          optionFilterProp="label"
+                        />
+                      )}
+                      <div>
+                        <Typography.Text type="secondary">{he.giftNote}</Typography.Text>
+                        <Input
+                          style={{ marginTop: 4 }}
+                          value={allotNote}
+                          onChange={(e) => setAllotNote(e.target.value)}
+                          placeholder={he.giftNote}
+                        />
+                      </div>
+                      <Flex align="center" gap={8}>
+                        <Switch checked={allotEnabled} onChange={setAllotEnabled} />
+                        <Typography.Text>
+                          {allotEnabled ? he.allotmentEnabled : he.allotmentDisabled}
+                        </Typography.Text>
+                      </Flex>
+                    </Space>
+                  </Modal>
                 </Space>
               ),
             },

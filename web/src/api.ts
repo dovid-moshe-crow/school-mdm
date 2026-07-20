@@ -202,4 +202,255 @@ export const api = {
     })
     return fetch(`/api/allowances?${p}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
   },
+  creditBalance(enrollmentID: string) {
+    const p = new URLSearchParams({ enrollment_id: enrollmentID })
+    return fetch(`/api/credits/balance?${p}`).then((r) =>
+      json<{
+        enrollment_id: string
+        balance: number
+        allotment_balance: number
+        available: number
+        access_cost: number
+      }>(r),
+    )
+  },
+  creditPackages() {
+    return fetch('/api/credits/packages').then((r) => json<CreditPackage[]>(r))
+  },
+  creditSettings() {
+    return fetch('/api/credits/settings').then((r) =>
+      json<{ access_request_cost: number; enabled: boolean }>(r),
+    )
+  },
+  creditCheckout(enrollmentID: string, packageID: string) {
+    return fetch('/api/credits/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollment_id: enrollmentID, package_id: packageID }),
+    }).then((r) =>
+      json<{
+        purchase_id: string
+        iframe_url: string
+        mode: string
+        credits: number
+        amount_agorot: number
+      }>(r),
+    )
+  },
+  creditConfirm(enrollmentID: string, purchaseID: string) {
+    return fetch('/api/credits/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollment_id: enrollmentID, purchase_id: purchaseID }),
+    }).then((r) => json<{ purchase: unknown; balance: number }>(r))
+  },
+  adminGiftCredits(enrollmentID: string, amount: number, note?: string) {
+    return fetch('/api/admin/credits/gift', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollment_id: enrollmentID, amount, note: note || '' }),
+    }).then((r) =>
+      json<{
+        balance: number
+        allotment_balance: number
+        available: number
+        applied: boolean
+        entry: CreditLedgerEntry
+      }>(r),
+    )
+  },
+  adminAdjustCredits(enrollmentID: string, amount: number, note?: string) {
+    return fetch('/api/admin/credits/adjust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollment_id: enrollmentID, amount, note: note || '' }),
+    }).then((r) =>
+      json<{
+        enrollment_id: string
+        balance: number
+        allotment_balance: number
+        available: number
+        applied: boolean
+        entry: CreditLedgerEntry
+        ledger: CreditLedgerEntry[]
+      }>(r),
+    )
+  },
+  adminCredits() {
+    return fetch('/api/admin/credits').then((r) =>
+      json<
+        {
+          enrollment_id: string
+          balance: number
+          allotment_balance?: number
+          available?: number
+          updated_at?: string
+        }[]
+      >(r),
+    )
+  },
+  adminCreditDevice(enrollmentID: string, ledgerLimit = 20) {
+    const p = new URLSearchParams({
+      enrollment_id: enrollmentID,
+      ledger_limit: String(ledgerLimit),
+    })
+    return fetch(`/api/admin/credits?${p}`).then((r) =>
+      json<{
+        enrollment_id: string
+        balance: number
+        allotment_balance: number
+        available: number
+        updated_at?: string
+        ledger: CreditLedgerEntry[]
+      }>(r),
+    )
+  },
+  adminCreditSettings() {
+    return fetch('/api/admin/credits/settings').then((r) => json<CreditSettings>(r))
+  },
+  adminUpdateCreditSettings(accessRequestCost: number, enabled?: boolean) {
+    const body: { access_request_cost: number; enabled?: boolean } = {
+      access_request_cost: accessRequestCost,
+    }
+    if (enabled !== undefined) body.enabled = enabled
+    return fetch('/api/admin/credits/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<CreditSettings>(r))
+  },
+  adminCreditPackages() {
+    return fetch('/api/admin/credits/packages').then((r) => json<CreditPackage[]>(r))
+  },
+  adminCreateCreditPackage(pkg: {
+    name_he: string
+    credits: number
+    price_agorot: number
+    active?: boolean
+    sort_order?: number
+  }) {
+    return fetch('/api/admin/credits/packages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pkg),
+    }).then((r) => json<CreditPackage>(r))
+  },
+  adminUpdateCreditPackage(
+    id: string,
+    patch: {
+      name_he?: string
+      credits?: number
+      price_agorot?: number
+      active?: boolean
+      sort_order?: number
+    },
+  ) {
+    return fetch(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<CreditPackage>(r))
+  },
+  adminDeactivateCreditPackage(id: string) {
+    return fetch(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }).then((r) => json<CreditPackage>(r))
+  },
+  adminAllotments() {
+    return fetch('/api/admin/credits/allotments').then((r) => json<CreditAllotmentRule[]>(r))
+  },
+  adminCreateAllotment(rule: {
+    name?: string
+    note?: string
+    amount: number
+    interval: AllotmentInterval
+    target_type: AllotmentTargetType
+    target_id?: string
+    enabled?: boolean
+  }) {
+    return fetch('/api/admin/credits/allotments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    }).then((r) => json<CreditAllotmentRule>(r))
+  },
+  adminUpdateAllotment(
+    id: string,
+    patch: {
+      name?: string
+      note?: string
+      amount?: number
+      interval?: AllotmentInterval
+      target_type?: AllotmentTargetType
+      target_id?: string
+      enabled?: boolean
+    },
+  ) {
+    return fetch(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<CreditAllotmentRule>(r))
+  },
+  adminDeleteAllotment(id: string) {
+    return fetch(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }).then((r) => json<{ ok: string }>(r))
+  },
+  adminRunAllotments() {
+    return fetch('/api/admin/credits/allotments/run', { method: 'POST' }).then((r) =>
+      json<{
+        rules_processed: number
+        grants_applied: number
+        grants_skipped: number
+        errors: number
+      }>(r),
+    )
+  },
+}
+
+export type CreditPackage = {
+  id: string
+  name_he: string
+  credits: number
+  price_agorot: number
+  active: boolean
+  sort_order: number
+}
+
+export type CreditSettings = {
+  access_request_cost: number
+  enabled: boolean
+  updated_at?: string
+}
+
+export type AllotmentInterval = 'daily' | 'weekly' | 'monthly'
+export type AllotmentTargetType = 'everyone' | 'group' | 'individual'
+
+export type CreditAllotmentRule = {
+  id: string
+  name: string
+  note?: string
+  amount: number
+  interval: AllotmentInterval
+  target_type: AllotmentTargetType
+  target_id: string
+  enabled: boolean
+  last_run_at?: string
+  created_at: string
+  updated_at: string
+  period_key?: string
+  next_period_at?: string
+}
+
+export type CreditLedgerEntry = {
+  id: string
+  enrollment_id: string
+  delta: number
+  balance_after: number
+  reason: string
+  ref_type?: string
+  ref_id?: string
+  note?: string
+  created_at: string
 }

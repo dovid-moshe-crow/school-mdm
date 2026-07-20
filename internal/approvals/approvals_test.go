@@ -2,9 +2,12 @@ package approvals
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/dwdmsh/school-mdm/internal/credits"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
+	"github.com/dwdmsh/school-mdm/internal/nedarim"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 	"github.com/dwdmsh/school-mdm/internal/store/memory"
@@ -250,6 +253,80 @@ func TestRequestMessageThreadAndReopen(t *testing.T) {
 	}
 	if got.Status != store.StatusPending {
 		t.Fatalf("student reply should reopen, status=%s", got.Status)
+	}
+}
+
+func TestAccessRequiresCreditsAndDenyRefunds(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	stub := &mdm.StubEnqueuer{}
+	creditSvc := &credits.Service{
+		Store:      mem,
+		Nedarim:    &nedarim.Client{Cfg: nedarim.Config{Mode: nedarim.ModeFake, PortalBase: "http://localhost:8080"}},
+		AccessCost: 1,
+		PortalBase: "http://localhost:8080",
+	}
+	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080", Credits: creditSvc}
+
+	_, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeAccess,
+		Kind:         policy.KindURL,
+		Value:        "https://example.com/paid",
+		EnrollmentID: "device-credits",
+		Reason:       "need it",
+	})
+	if !errors.Is(err, store.ErrInsufficientCredits) {
+		t.Fatalf("expected insufficient credits, got %v", err)
+	}
+
+	if _, err := creditSvc.Gift(ctx, "device-credits", 2, ""); err != nil {
+		t.Fatal(err)
+	}
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeAccess,
+		Kind:         policy.KindURL,
+		Value:        "https://example.com/paid",
+		EnrollmentID: "device-credits",
+		Reason:       "need it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bal, _ := creditSvc.Balance(ctx, "device-credits")
+	if bal.Balance != 1 {
+		t.Fatalf("balance after spend=%d want 1", bal.Balance)
+	}
+
+	if _, err := svc.Decide(ctx, DecideInput{RequestID: req.ID, Approve: false}); err != nil {
+		t.Fatal(err)
+	}
+	bal, _ = creditSvc.Balance(ctx, "device-credits")
+	if bal.Balance != 2 {
+		t.Fatalf("balance after deny refund=%d want 2", bal.Balance)
+	}
+}
+
+func TestGeneralRequestIsFree(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	stub := &mdm.StubEnqueuer{}
+	creditSvc := &credits.Service{Store: mem, AccessCost: 1}
+	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080", Credits: creditSvc}
+
+	req, err := svc.CreateRequest(ctx, CreateRequestInput{
+		Type:         store.TypeGeneral,
+		Value:        "How do I print?",
+		EnrollmentID: "device-free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Status != store.StatusPending {
+		t.Fatalf("status=%s", req.Status)
+	}
+	bal, _ := creditSvc.Balance(ctx, "device-free")
+	if bal.Balance != 0 {
+		t.Fatalf("general should not spend, balance=%d", bal.Balance)
 	}
 }
 

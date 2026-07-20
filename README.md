@@ -71,6 +71,29 @@ Claim the DB to your Neon account (optional, keeps it permanently) using `PUBLIC
 Access approvals update allowlists and stub-enqueue a profile. General/bug tickets only change status.
 App metadata is cached in `app_metadata` and refreshed from the iTunes Search/Lookup API.
 
+## Credits + Nedarim Plus
+
+Access requests (app/URL) cost credits per device (`enrollment_id`). General and bug tickets are free.
+Denied access requests refund the credit.
+
+| Env | Default | Notes |
+|-----|---------|-------|
+| `NEDARIM_MODE` | `fake` | `fake` = local DebitIframe simulation; `live` = real Nedarim |
+| `NEDARIM_MOSAD_ID` | | Required for live |
+| `NEDARIM_API_VALID` | | Required for live |
+| `NEDARIM_API_PASSWORD` | | Optional; used when creating DebitIframe transactions |
+| `CREDITS_ACCESS_COST` | `1` | Credits spent per access request |
+
+### Fake payment flow (local)
+
+1. Open portal `/d/{deviceId}` → **רכישת קרדיטים**
+2. Pick a package → fake Nedarim iframe opens
+3. Click **תשלום** → server marks purchase paid via the same webhook path and credits the ledger
+4. Parent confirms via `POST /api/credits/confirm` and refreshes balance
+5. Access requests now succeed; deny in admin refunds the credit
+
+Packages seeded: 10 / 50 / 100 credits (₪10 / ₪45 / ₪80). Admins can gift credits on the Devices tab.
+
 ## Layout
 
 See `internal/` — `policy` and `approvals` have no HTTP or Nano imports.
