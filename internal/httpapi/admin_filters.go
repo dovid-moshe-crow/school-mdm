@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
@@ -70,7 +71,7 @@ func (a *API) handleListRequests(w http.ResponseWriter, r *http.Request) {
 		if device != "" && req.EnrollmentID != device {
 			continue
 		}
-		if q != "" && !requestMatchesQuery(req, q) {
+		if q != "" && !a.requestMatchesQuery(r, req, q) {
 			continue
 		}
 		filtered = append(filtered, req)
@@ -267,31 +268,121 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	out, err := a.Store.ListDevices(r.Context())
+	school, err := a.Store.ListDevices(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if out == nil {
-		out = []store.Device{}
+	byID := map[string]store.Device{}
+	for _, d := range school {
+		byID[d.EnrollmentID] = d
 	}
+	if a.MDMStore != nil {
+		ens, err := a.MDMStore.ListEnrollments(r.Context())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		for _, e := range ens {
+			d := byID[e.ID]
+			d.EnrollmentID = e.ID
+			d.MDM = true
+			d.SerialNumber = e.SerialNumber
+			en := e.Enabled
+			d.Enabled = &en
+			if !e.LastSeenAt.IsZero() {
+				d.LastSeenAt = e.LastSeenAt.Format(time.RFC3339)
+			}
+			_ = a.Store.EnsureDevice(r.Context(), e.ID)
+			if meta, err := a.Store.GetDevice(r.Context(), e.ID); err == nil {
+				d.Name = meta.Name
+				d.Unrestricted = meta.Unrestricted
+			}
+			if gids, err := a.Store.ListGroupsForDevice(r.Context(), e.ID); err == nil {
+				d.GroupIDs = gids
+			}
+			byID[e.ID] = d
+		}
+	}
+	out := make([]store.Device, 0, len(byID))
+	for _, d := range byID {
+		if d.GroupIDs == nil {
+			if gids, err := a.Store.ListGroupsForDevice(r.Context(), d.EnrollmentID); err == nil {
+				d.GroupIDs = gids
+			}
+		}
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ni, nj := out[i].Name, out[j].Name
+		if ni == "" {
+			ni = out[i].EnrollmentID
+		}
+		if nj == "" {
+			nj = out[j].EnrollmentID
+		}
+		return ni < nj
+	})
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	var body struct {
-		Name string `json:"name"`
+		Name         *string `json:"name"`
+		Unrestricted *bool   `json:"unrestricted"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if err := a.Store.SetDeviceName(r.Context(), id, body.Name); err != nil {
+	if err := a.Store.EnsureDevice(r.Context(), id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, store.Device{EnrollmentID: id, Name: strings.TrimSpace(body.Name)})
+	if body.Name != nil {
+		if err := a.Store.SetDeviceName(r.Context(), id, *body.Name); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		actorType, actor := a.adminActor(r)
+		a.audit(r, activity.Event{
+			Category: store.ActivityCategoryDevices, Action: "device_rename",
+			ActorType: actorType, Actor: actor, EnrollmentID: id,
+			Result: store.ActivityResultOK, Summary: "עודכן כינוי למכשיר",
+			Detail: map[string]any{"name": *body.Name},
+		})
+		// Lock screen asset tag uses the display name — refresh that profile.
+		if a.Push != nil {
+			if err := a.Push.EnsureLockScreenMessage(r.Context(), id); err != nil && a.Log != nil {
+				a.Log.Warn("lock screen after rename", "enrollment_id", id, "err", err)
+			}
+		}
+	}
+	if body.Unrestricted != nil {
+		if err := a.Store.SetDeviceUnrestricted(r.Context(), id, *body.Unrestricted); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		a.auditAction(r, actionDeviceUnrestricted, map[string]any{
+			"enrollment_id": id, "unrestricted": *body.Unrestricted,
+		})
+		if a.Notify != nil {
+			a.Notify.UnrestrictedChanged(r.Context(), id, *body.Unrestricted)
+		}
+		if a.Push != nil {
+			if err := a.Push.Reconcile(r.Context(), id); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+	}
+	d, err := a.Store.GetDevice(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, store.Device{EnrollmentID: id})
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
 }
 
 func (a *API) lookupAppMeta(r *http.Request, bundleID string) *store.AppMeta {
@@ -321,7 +412,7 @@ func matchRequestStatus(got store.RequestStatus, want string) bool {
 	}
 }
 
-func requestMatchesQuery(req store.Request, q string) bool {
+func (a *API) requestMatchesQuery(r *http.Request, req store.Request, q string) bool {
 	parts := []string{
 		string(req.Type),
 		string(req.TargetKind),
@@ -330,6 +421,14 @@ func requestMatchesQuery(req store.Request, q string) bool {
 		req.Reason,
 		string(req.Status),
 		req.ID,
+	}
+	if req.TargetKind == policy.KindApp {
+		if meta := a.lookupAppMeta(r, req.Value); meta != nil {
+			parts = append(parts, meta.Name, meta.Artist, meta.BundleID)
+		}
+	}
+	if d, err := a.Store.GetDevice(r.Context(), req.EnrollmentID); err == nil {
+		parts = append(parts, d.Name, d.EnrollmentID)
 	}
 	blob := strings.ToLower(strings.Join(parts, " "))
 	return strings.Contains(blob, q)

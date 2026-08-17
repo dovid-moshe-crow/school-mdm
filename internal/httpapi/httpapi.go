@@ -9,11 +9,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/abm"
+	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
 	"github.com/dwdmsh/school-mdm/internal/credits"
+	"github.com/dwdmsh/school-mdm/internal/devicepush"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
+	"github.com/dwdmsh/school-mdm/internal/mdmstore"
+	"github.com/dwdmsh/school-mdm/internal/notify"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 	"github.com/dwdmsh/school-mdm/internal/webui"
@@ -21,13 +26,19 @@ import (
 
 // API serves product HTTP endpoints.
 type API struct {
-	Cfg     config.Config
-	Service *approvals.Service
-	Credits *credits.Service
-	Catalog *appmeta.Catalog
-	Store   store.Store
-	Stub    *mdm.StubEnqueuer
-	Log     *slog.Logger
+	Cfg      config.Config
+	Service  *approvals.Service
+	Credits  *credits.Service
+	Catalog  *appmeta.Catalog
+	Store    store.Store
+	MDMStore mdmstore.Store
+	Push     *devicepush.Service
+	Enqueue  mdm.CommandEnqueuer
+	Stub     *mdm.StubEnqueuer
+	ABM      *abm.Service
+	Notify   *notify.Service
+	Activity *activity.Logger
+	Log      *slog.Logger
 
 	accessMu    sync.Mutex
 	accessCache map[string]cachedAccessIndex
@@ -42,6 +53,17 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/allowances", a.handleDeleteAllowance)
 	mux.HandleFunc("GET /api/devices", a.handleListDevices)
 	mux.HandleFunc("PATCH /api/devices/{id}", a.handleUpdateDevice)
+	mux.HandleFunc("GET /api/admin/activity", a.requireAdmin(a.handleListActivity))
+	mux.HandleFunc("GET /api/packs", a.handleListPacks)
+	mux.HandleFunc("POST /api/packs", a.handleCreatePack)
+	mux.HandleFunc("GET /api/packs/{id}", a.handleGetPack)
+	mux.HandleFunc("PATCH /api/packs/{id}", a.handleUpdatePack)
+	mux.HandleFunc("DELETE /api/packs/{id}", a.handleDeletePack)
+	mux.HandleFunc("POST /api/packs/{id}/items", a.handleAddPackItem)
+	mux.HandleFunc("DELETE /api/packs/{id}/items", a.handleRemovePackItem)
+	mux.HandleFunc("POST /api/packs/{id}/assignments", a.handleAddPackAssignment)
+	mux.HandleFunc("DELETE /api/packs/{id}/assignments", a.handleRemovePackAssignment)
+
 	mux.HandleFunc("GET /api/groups", a.handleListGroups)
 	mux.HandleFunc("POST /api/groups", a.handleCreateGroup)
 	mux.HandleFunc("GET /api/groups/{id}", a.handleGetGroup)
@@ -54,6 +76,8 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/access-status", a.handleAccessStatus)
 	mux.HandleFunc("GET /api/device/{deviceID}/requests", a.handleDeviceRequests)
 	mux.HandleFunc("POST /api/device/{deviceID}/requests/{id}/messages", a.handleDevicePostMessage)
+	mux.HandleFunc("POST /api/device/{deviceID}/push-token", a.handleDevicePushToken)
+	mux.HandleFunc("POST /api/devices/{id}/push-token", a.handleDevicePushTokenAlias)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
 	mux.HandleFunc("GET /api/requests", a.handleListRequests)
 	mux.HandleFunc("GET /api/requests/{id}", a.handleGetRequest)
@@ -77,6 +101,7 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/credits/adjust", a.handleAdminAdjustCredits)
 	mux.HandleFunc("GET /api/admin/credits", a.handleAdminListCredits)
 	mux.HandleFunc("GET /api/admin/credits/ledger", a.handleAdminCreditLedger)
+	mux.HandleFunc("GET /api/admin/credits/purchases", a.requireAdmin(a.handleAdminListPurchases))
 	mux.HandleFunc("GET /api/admin/credits/settings", a.handleAdminGetCreditSettings)
 	mux.HandleFunc("PUT /api/admin/credits/settings", a.handleAdminPutCreditSettings)
 	mux.HandleFunc("GET /api/admin/credits/packages", a.handleAdminListPackages)
@@ -89,6 +114,49 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/credits/allotments/{id}", a.handleAdminDeleteAllotment)
 	mux.HandleFunc("POST /api/admin/credits/allotments/run", a.handleAdminRunAllotments)
 
+	// MDM admin (thin; requires Bearer admin token)
+	mux.HandleFunc("GET /api/mdm/status", a.requireAdmin(a.handleMDMStatus))
+	mux.HandleFunc("GET /api/mdm/devices", a.requireAdmin(a.handleMDMListDevices))
+	mux.HandleFunc("GET /api/mdm/devices/{id}", a.requireAdmin(a.handleMDMGetDevice))
+	mux.HandleFunc("DELETE /api/mdm/devices/{id}", a.requireAdmin(a.handleMDMDeleteDevice))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/push", a.requireAdmin(a.handleMDMPush))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/install-profile", a.requireAdmin(a.handleMDMInstallProfile))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/remove-profile", a.requireAdmin(a.handleMDMRemoveProfile))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/device-information", a.requireAdmin(a.handleMDMDeviceInformation))
+	mux.HandleFunc("GET /api/mdm/devices/{id}/commands/{commandUUID}", a.requireAdmin(a.handleMDMCommandResult))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/profile-list", a.requireAdmin(a.handleMDMProfileList))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/installed-apps", a.requireAdmin(a.handleMDMInstalledApps))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/reconcile", a.requireAdmin(a.handleMDMReconcile))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/install-companion", a.requireAdmin(a.handleMDMInstallCompanion))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/configure-companion", a.requireAdmin(a.handleMDMConfigureCompanion))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/clear-allowlist", a.requireAdmin(a.handleMDMClearAllowlist))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/lock", a.requireAdmin(a.handleMDMLock))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/clear-passcode", a.requireAdmin(a.handleMDMClearPasscode))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/restart", a.requireAdmin(a.handleMDMRestart))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/shutdown", a.requireAdmin(a.handleMDMShutDown))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/erase", a.requireAdmin(a.handleMDMErase))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/lost-mode/enable", a.requireAdmin(a.handleMDMEnableLostMode))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/lost-mode/disable", a.requireAdmin(a.handleMDMDisableLostMode))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/lost-mode/play-sound", a.requireAdmin(a.handleMDMPlayLostModeSound))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/lost-mode/location", a.requireAdmin(a.handleMDMDeviceLocation))
+	mux.HandleFunc("POST /api/mdm/devices/{id}/security-info", a.requireAdmin(a.handleMDMSecurityInfo))
+	mux.HandleFunc("POST /api/mdm/devices/bulk", a.requireAdmin(a.handleMDMBulk))
+	mux.HandleFunc("PUT /api/mdm/pushcert", a.requireAdmin(a.handleMDMPushCert))
+
+	mux.HandleFunc("GET /api/mdm/abm/account", a.requireAdmin(a.handleABMAccount))
+	mux.HandleFunc("GET /api/mdm/abm/settings", a.requireAdmin(a.handleABMSettingsGet))
+	mux.HandleFunc("PUT /api/mdm/abm/settings", a.requireAdmin(a.handleABMSettingsPut))
+	mux.HandleFunc("PUT /api/mdm/vpp/token", a.requireAdmin(a.handleVPPTokenPut))
+	mux.HandleFunc("DELETE /api/mdm/vpp/token", a.requireAdmin(a.handleVPPTokenDelete))
+	mux.HandleFunc("GET /api/mdm/abm/dep-names", a.requireAdmin(a.handleABMDEPNames))
+	mux.HandleFunc("GET /api/mdm/abm/devices", a.requireAdmin(a.handleABMListDevices))
+	mux.HandleFunc("POST /api/mdm/abm/sync", a.requireAdmin(a.handleABMSync))
+	// Profile read remains available to external enrollment tooling. Creating or
+	// replacing an Apple profile must stay admin-only.
+	mux.HandleFunc("GET /api/mdm/abm/profile", a.handleABMGetProfile)
+	mux.HandleFunc("POST /api/mdm/abm/profile", a.requireAdmin(a.handleABMDefineProfile))
+	mux.HandleFunc("POST /api/mdm/abm/assign", a.requireAdmin(a.handleABMAssignProfile))
+
 	mux.Handle("/", webui.Handler())
 }
 
@@ -98,9 +166,11 @@ func (a *API) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"store": a.Store.Kind(),
-		"time":  time.Now().UTC().Format(time.RFC3339),
+		"ok":          true,
+		"store":       a.Store.Kind(),
+		"mdm_enqueue": a.Cfg.MDMEnqueue,
+		"mdm_live":    a.Cfg.MDMLive(),
+		"time":        time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -207,6 +277,21 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.Catalog.LookupBundle(r.Context(), req.Value)
 	}
 	a.invalidateAccessIndex(req.EnrollmentID)
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryRequests,
+		Action:       "request_create",
+		ActorType:    store.ActivityActorDevice,
+		Actor:        req.EnrollmentID,
+		EnrollmentID: req.EnrollmentID,
+		RequestID:    req.ID,
+		Result:       store.ActivityResultOK,
+		Summary:      "נוצרה בקשה חדשה",
+		Detail: map[string]any{
+			"type":  req.Type,
+			"kind":  req.TargetKind,
+			"value": req.Value,
+		},
+	})
 	writeJSON(w, http.StatusCreated, req)
 }
 
@@ -321,6 +406,18 @@ func (a *API) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateAccessIndex(req.EnrollmentID)
+	actorType, actor := a.adminActor(r)
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryRequests,
+		Action:       "request_approve",
+		ActorType:    actorType,
+		Actor:        actor,
+		EnrollmentID: req.EnrollmentID,
+		RequestID:    req.ID,
+		Result:       store.ActivityResultOK,
+		Summary:      "בקשה אושרה",
+		Detail:       map[string]any{"scope": body.Scope, "duration": body.Duration, "group_id": body.GroupID},
+	})
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -335,6 +432,17 @@ func (a *API) handleDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateAccessIndex(req.EnrollmentID)
+	actorType, actor := a.adminActor(r)
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryRequests,
+		Action:       "request_deny",
+		ActorType:    actorType,
+		Actor:        actor,
+		EnrollmentID: req.EnrollmentID,
+		RequestID:    req.ID,
+		Result:       store.ActivityResultOK,
+		Summary:      "בקשה נדחתה",
+	})
 	writeJSON(w, http.StatusOK, req)
 }
 

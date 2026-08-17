@@ -472,3 +472,53 @@ func TestPeriodKeyAndNext(t *testing.T) {
 	}
 }
 
+func TestWebhookRefusalDoesNotCredit(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := testService(t)
+	pkgs, _ := svc.Packages(ctx)
+	co, err := svc.StartCheckout(ctx, "dev-refuse", pkgs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := svc.HandleWebhook(ctx, WebhookPayload{
+		ClientUniqueID: co.Purchase.ClientUniqueID,
+		Status:         "Error",
+		TransactionID:  "tx-refused",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != store.PurchasePending {
+		t.Fatalf("status=%s want pending", p.Status)
+	}
+	bal, _ := svc.Balance(ctx, "dev-refuse")
+	if bal.Balance != 0 {
+		t.Fatalf("balance=%d want 0", bal.Balance)
+	}
+}
+
+func TestWebhookSuccessCredits(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := testService(t)
+	pkgs, _ := svc.Packages(ctx)
+	co, err := svc.StartCheckout(ctx, "dev-hook", pkgs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := svc.HandleWebhook(ctx, WebhookPayload{
+		ClientUniqueID: co.Purchase.ClientUniqueID,
+		Status:         "OK",
+		TransactionID:  "tx-ok-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != store.PurchasePaid {
+		t.Fatalf("status=%s", p.Status)
+	}
+	bal, _ := svc.Balance(ctx, "dev-hook")
+	if bal.Balance != pkgs[0].Credits {
+		t.Fatalf("balance=%d want %d", bal.Balance, pkgs[0].Credits)
+	}
+}
+

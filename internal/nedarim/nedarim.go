@@ -15,9 +15,10 @@ const (
 	ModeFake = "fake"
 	ModeLive = "live"
 
-	// Default iframe host used by Nedarim Plus DebitIframe.
-	IframeBaseURL = "https://www.matara.pro/nedarimplus/iframe"
+	// Default iframe host used by Nedarim Plus DebitIframe (sample uses matara.pro).
+	IframeBaseURL = "https://matara.pro/nedarimplus/iframe"
 	// DebitIframeCreateURL registers a server-side DebitIframe transaction (live).
+	// Action must be a GET query param (form body Action is ignored).
 	DebitIframeCreateURL = "https://www.matara.pro/nedarimplus/V6/Files/WebServices/DebitIframe.aspx"
 )
 
@@ -144,13 +145,16 @@ func (c *Client) createLiveTransaction(ctx context.Context, in CreateTxnInput, a
 	form.Set("ApiValid", c.Cfg.ApiValid)
 	form.Set("Amount", amountShekels)
 	form.Set("Currency", "1")
+	form.Set("Tashlumim", "1")
+	form.Set("PaymentType", "Ragil")
 	form.Set("ClientUniqueId", in.ClientUniqueID)
 	form.Set("CallbackParam", in.ClientUniqueID)
+	form.Set("Param2", in.ClientUniqueID)
 	form.Set("CallBack", in.CallbackURL)
 	form.Set("Comment", in.Comment)
-	form.Set("Action", "CreateTransaction")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DebitIframeCreateURL, strings.NewReader(form.Encode()))
+	endpoint := DebitIframeCreateURL + "?Action=CreateTransaction"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -166,28 +170,34 @@ func (c *Client) createLiveTransaction(ctx context.Context, in CreateTxnInput, a
 		return "", fmt.Errorf("nedarim create status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	// Response may be JSON {"TransactionId":"..."} or plain text.
+	// Live API returns {"Status":"OK","ID":"123"} (spaces around colons are common).
 	var parsed struct {
+		Status        string `json:"Status"`
+		Message       string `json:"Message"`
 		TransactionID string `json:"TransactionId"`
 		TxID          string `json:"transactionId"`
-		ID            string `json:"Id"`
+		ID            string `json:"ID"`
+		Id            string `json:"Id"`
 	}
 	if err := json.Unmarshal(body, &parsed); err == nil {
-		if parsed.TransactionID != "" {
-			return parsed.TransactionID, nil
+		if strings.EqualFold(parsed.Status, "Error") {
+			msg := strings.TrimSpace(parsed.Message)
+			if msg == "" {
+				msg = "create failed"
+			}
+			return "", fmt.Errorf("nedarim create: %s", msg)
 		}
-		if parsed.TxID != "" {
-			return parsed.TxID, nil
-		}
-		if parsed.ID != "" {
-			return parsed.ID, nil
+		for _, id := range []string{parsed.TransactionID, parsed.TxID, parsed.ID, parsed.Id} {
+			if strings.TrimSpace(id) != "" {
+				return strings.TrimSpace(id), nil
+			}
 		}
 	}
 	text := strings.TrimSpace(string(body))
 	if text != "" && !strings.Contains(text, "<") && len(text) < 128 {
 		return text, nil
 	}
-	return "", fmt.Errorf("nedarim create: unexpected response")
+	return "", fmt.Errorf("nedarim create: unexpected response: %s", text)
 }
 
 // IframeEmbedURL is the raw Nedarim Plus PCI iframe (used by the live bridge page).

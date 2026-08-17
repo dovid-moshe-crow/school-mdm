@@ -51,6 +51,7 @@ type Grant struct {
 var Essentials = []string{
 	"com.apple.mobilesafari",
 	"com.apple.webapp",
+	"com.kfilter.portal", // KFilter companion — request portal + push
 }
 
 // Applies reports whether target applies to enrollmentID given its group memberships.
@@ -77,7 +78,9 @@ func (t Target) Applies(enrollmentID string, groupIDs []string) bool {
 
 // Effective computes allowlists: essentials ∪ global ∪ groups ∪ device (+ non-expired grants).
 func Effective(base []Entry, grants []Grant, groupIDs []string, enrollmentID string, now time.Time) (apps []string, urls []string) {
-	appSet := map[string]struct{}{}
+	// Apps: case-insensitive dedupe, but keep Apple's casing for MDM profiles
+	// (allowListedAppBundleIDs is case-sensitive on iOS).
+	appByKey := map[string]string{}
 	urlSet := map[string]struct{}{}
 
 	add := func(kind Kind, value string) {
@@ -87,7 +90,15 @@ func Effective(base []Entry, grants []Grant, groupIDs []string, enrollmentID str
 		}
 		switch kind {
 		case KindApp:
-			appSet[v] = struct{}{}
+			key := AppKey(v)
+			if prev, ok := appByKey[key]; ok {
+				// Prefer a value that preserves uppercase (canonical App Store form).
+				if prev == key && v != key {
+					appByKey[key] = v
+				}
+				return
+			}
+			appByKey[key] = v
 		case KindURL:
 			urlSet[v] = struct{}{}
 		}
@@ -109,10 +120,21 @@ func Effective(base []Entry, grants []Grant, groupIDs []string, enrollmentID str
 			add(g.Kind, g.Value)
 		}
 	}
-	return sortedKeys(appSet), sortedKeys(urlSet)
+	apps = make([]string, 0, len(appByKey))
+	for _, v := range appByKey {
+		apps = append(apps, v)
+	}
+	sort.Strings(apps)
+	return apps, sortedKeys(urlSet)
+}
+
+// AppKey is a case-insensitive identity for bundle IDs (lookups / dedupe only).
+func AppKey(bundleID string) string {
+	return strings.ToLower(strings.TrimSpace(bundleID))
 }
 
 // Normalize cleans bundle IDs and URL/host values.
+// App bundle IDs keep their original case — iOS matching is case-sensitive.
 func Normalize(kind Kind, value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -120,7 +142,7 @@ func Normalize(kind Kind, value string) string {
 	}
 	switch kind {
 	case KindApp:
-		return strings.ToLower(value)
+		return value
 	case KindURL:
 		return normalizeURL(value)
 	default:

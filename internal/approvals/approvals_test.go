@@ -43,8 +43,9 @@ func TestApproveAccessCreatesGrantAndEnqueuesProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertContains(t, urls, "example.com/lesson")
-	if len(stub.Snapshot()) != 1 {
-		t.Fatalf("expected 1 stub command, got %d", len(stub.Snapshot()))
+	// Reconcile installs school allowlist + help web clip + store web clip.
+	if n := len(stub.Snapshot()); n != 3 {
+		t.Fatalf("expected 3 stub commands (allowlist+help+store webclips), got %d", n)
 	}
 }
 

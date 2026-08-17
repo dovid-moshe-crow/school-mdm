@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -282,6 +283,138 @@ func (s *Store) GetCreditSettings(context.Context) (store.CreditSettings, error)
 	return *s.settings, nil
 }
 
+func (s *Store) GetMDMSettings(_ context.Context) (store.MDMSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mdmSettings == nil {
+		return store.MDMSettings{}, fmt.Errorf("mdm settings: %w", store.ErrNotFound)
+	}
+	out := *s.mdmSettings
+	out.HasVPPToken = len(out.VPPToken) > 0
+	return out, nil
+}
+
+func (s *Store) UpsertMDMSettings(_ context.Context, settings store.MDMSettings) (store.MDMSettings, error) {
+	name := strings.TrimSpace(settings.DepName)
+	if name == "" {
+		return store.MDMSettings{}, fmt.Errorf("dep_name required")
+	}
+	if len(name) > 64 {
+		return store.MDMSettings{}, fmt.Errorf("dep_name too long")
+	}
+	bundle := strings.TrimSpace(settings.CompanionBundleID)
+	if bundle == "" {
+		bundle = "com.kfilter.portal"
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if settings.VPPToken == nil && s.mdmSettings != nil {
+		settings.VPPToken = append([]byte(nil), s.mdmSettings.VPPToken...)
+		if strings.TrimSpace(settings.VPPTokenFilename) == "" {
+			settings.VPPTokenFilename = s.mdmSettings.VPPTokenFilename
+		}
+		if settings.VPPTokenUpdatedAt == nil {
+			settings.VPPTokenUpdatedAt = s.mdmSettings.VPPTokenUpdatedAt
+		}
+	} else if len(settings.VPPToken) > 0 {
+		t := now
+		settings.VPPTokenUpdatedAt = &t
+	} else {
+		settings.VPPTokenUpdatedAt = nil
+	}
+	settings.DepName = name
+	settings.CompanionBundleID = bundle
+	settings.LockScreenFootnote = strings.TrimSpace(settings.LockScreenFootnote)
+	settings.UpdatedAt = now
+	settings.HasVPPToken = len(settings.VPPToken) > 0
+	cp := settings
+	s.mdmSettings = &cp
+	return settings, nil
+}
+
+func (s *Store) GetABMDeviceCache(_ context.Context) (store.ABMDeviceCache, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := store.ABMDeviceCache{Devices: json.RawMessage(`[]`)}
+	if len(s.abmDevices) > 0 {
+		out.Devices = append(json.RawMessage(nil), s.abmDevices...)
+	}
+	if s.abmSyncedAt != nil {
+		t := *s.abmSyncedAt
+		out.SyncedAt = &t
+	}
+	return out, nil
+}
+
+func (s *Store) SaveABMDeviceCache(_ context.Context, devices json.RawMessage) (store.ABMDeviceCache, error) {
+	if len(devices) == 0 {
+		devices = json.RawMessage(`[]`)
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.abmDevices = append(json.RawMessage(nil), devices...)
+	s.abmSyncedAt = &now
+	return store.ABMDeviceCache{Devices: append(json.RawMessage(nil), devices...), SyncedAt: &now}, nil
+}
+
+func (s *Store) UpsertPushToken(_ context.Context, t store.DevicePushToken) error {
+	enrollment := strings.TrimSpace(t.EnrollmentID)
+	token := strings.TrimSpace(t.Token)
+	platform := strings.TrimSpace(t.Platform)
+	if enrollment == "" || token == "" {
+		return fmt.Errorf("enrollment_id and token required")
+	}
+	if platform == "" {
+		platform = "ios"
+	}
+	t.EnrollmentID = enrollment
+	t.Token = token
+	t.Platform = platform
+	t.UpdatedAt = time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pushTokens == nil {
+		s.pushTokens = map[string]store.DevicePushToken{}
+	}
+	s.pushTokens[token] = t
+	return nil
+}
+
+func (s *Store) ListPushTokens(_ context.Context, enrollmentID string) ([]store.DevicePushToken, error) {
+	enrollment := strings.TrimSpace(enrollmentID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []store.DevicePushToken
+	for _, t := range s.pushTokens {
+		if t.EnrollmentID == enrollment {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) DeletePushToken(_ context.Context, token string) error {
+	token = strings.TrimSpace(token)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pushTokens, token)
+	return nil
+}
+
+func (s *Store) HasPushToken(_ context.Context, enrollmentID string) (bool, error) {
+	enrollment := strings.TrimSpace(enrollmentID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.pushTokens {
+		if t.EnrollmentID == enrollment {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) UpsertCreditSettings(_ context.Context, settings store.CreditSettings) (store.CreditSettings, error) {
 	if settings.AccessRequestCost < 1 {
 		return store.CreditSettings{}, fmt.Errorf("access_request_cost must be >= 1")
@@ -336,6 +469,49 @@ func (s *Store) GetCreditPurchaseByClientUnique(_ context.Context, clientUniqueI
 		return store.CreditPurchase{}, fmt.Errorf("credit purchase %s: %w", clientUniqueID, store.ErrNotFound)
 	}
 	return s.purchases[id], nil
+}
+
+func (s *Store) ListCreditPurchases(_ context.Context, f store.CreditPurchaseFilter) ([]store.CreditPurchase, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	all := make([]store.CreditPurchase, 0, len(s.purchases))
+	for _, p := range s.purchases {
+		if e := strings.TrimSpace(f.EnrollmentID); e != "" && p.EnrollmentID != e {
+			continue
+		}
+		if st := strings.TrimSpace(f.Status); st != "" && string(p.Status) != st {
+			continue
+		}
+		all = append(all, p)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		ti, tj := all[i].CreatedAt, all[j].CreatedAt
+		if all[i].PaidAt != nil {
+			ti = *all[i].PaidAt
+		}
+		if all[j].PaidAt != nil {
+			tj = *all[j].PaidAt
+		}
+		return ti.After(tj)
+	})
+	if offset >= len(all) {
+		return []store.CreditPurchase{}, nil
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	out := make([]store.CreditPurchase, end-offset)
+	copy(out, all[offset:end])
+	return out, nil
 }
 
 func (s *Store) MarkPurchasePaid(_ context.Context, in store.MarkPurchasePaidInput) (store.CreditPurchase, bool, error) {

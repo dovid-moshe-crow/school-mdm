@@ -14,12 +14,14 @@ export default function Home() {
             {he.homeLead}
           </Typography.Paragraph>
         </div>
-        <Card>
+        <Card className="home-cta">
           <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
             פורטל תלמיד: <Typography.Text code>/d/&lt;מזהה-מכשיר&gt;</Typography.Text>
           </Typography.Paragraph>
           <Link to="/admin">
-            <Button type="primary">{he.openAdmin}</Button>
+            <Button type="primary" block>
+              {he.openAdmin}
+            </Button>
           </Link>
         </Card>
       </Space>

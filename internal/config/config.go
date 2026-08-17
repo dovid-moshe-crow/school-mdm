@@ -25,6 +25,19 @@ type Config struct {
 	NedarimApiValid    string
 	// CreditsAccessCost is how many credits an access request costs (default 1).
 	CreditsAccessCost int
+
+	// MDM protocol (additive). When MDMEnqueue=live, DATABASE_URL + MDM_SCEP_CAPASS are required.
+	MDMEnqueue      string // stub | live
+	MDMPublicURL    string
+	MDMTopic        string
+	MDMCheckin      bool
+	MDMCertHeader   string
+	MDMSCEPPass      string
+	MDMSCEPChallenge string
+	MDMDebug         bool
+	// MDMDepName seeds mdm_settings.dep_name once when the DB row is missing.
+	// Runtime value is edited in admin UI / DB — not read from env after seed.
+	MDMDepName string
 }
 
 // Load reads configuration from the process environment.
@@ -41,6 +54,15 @@ func Load() (Config, error) {
 		NedarimApiPassword: strings.TrimSpace(os.Getenv("NEDARIM_API_PASSWORD")),
 		NedarimApiValid:    strings.TrimSpace(os.Getenv("NEDARIM_API_VALID")),
 		CreditsAccessCost:  getenvInt("CREDITS_ACCESS_COST", 1),
+		MDMEnqueue:         strings.ToLower(getenv("MDM_ENQUEUE", "stub")),
+		MDMPublicURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("MDM_PUBLIC_URL")), "/"),
+		MDMTopic:           strings.TrimSpace(os.Getenv("MDM_TOPIC")),
+		MDMCheckin:         getenvBool("MDM_CHECKIN", false),
+		MDMCertHeader:      strings.TrimSpace(os.Getenv("MDM_CERT_HEADER")),
+		MDMSCEPPass:        strings.TrimSpace(os.Getenv("MDM_SCEP_CAPASS")),
+		MDMSCEPChallenge:   strings.TrimSpace(os.Getenv("MDM_SCEP_CHALLENGE")),
+		MDMDebug:           getenvBool("MDM_DEBUG", false),
+		MDMDepName:         getenv("MDM_DEP_NAME", "nanok"),
 	}
 	if cfg.HTTPAddr == "" {
 		return Config{}, fmt.Errorf("HTTP_ADDR must not be empty")
@@ -51,7 +73,38 @@ func Load() (Config, error) {
 	if cfg.CreditsAccessCost < 1 {
 		return Config{}, fmt.Errorf("CREDITS_ACCESS_COST must be >= 1")
 	}
+	if cfg.MDMEnqueue != "stub" && cfg.MDMEnqueue != "live" {
+		return Config{}, fmt.Errorf("MDM_ENQUEUE must be stub or live")
+	}
+	if cfg.MDMEnqueue == "live" {
+		if cfg.DatabaseURL == "" {
+			return Config{}, fmt.Errorf("DATABASE_URL is required when MDM_ENQUEUE=live")
+		}
+		if cfg.MDMSCEPPass == "" {
+			return Config{}, fmt.Errorf("MDM_SCEP_CAPASS is required when MDM_ENQUEUE=live")
+		}
+	}
 	return cfg, nil
+}
+
+func getenvBool(key string, fallback bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+// MDMLive reports whether the Apple MDM protocol plane should start.
+func (c Config) MDMLive() bool {
+	return c.MDMEnqueue == "live"
 }
 
 func getenv(key, fallback string) string {

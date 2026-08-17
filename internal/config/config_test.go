@@ -19,10 +19,17 @@ func TestLoadDefaults(t *testing.T) {
 	_ = os.Unsetenv("PORTAL_BASE_URL")
 	_ = os.Unsetenv("NEDARIM_MODE")
 	_ = os.Unsetenv("CREDITS_ACCESS_COST")
+	_ = os.Unsetenv("MDM_ENQUEUE")
+	_ = os.Unsetenv("MDM_SCEP_CAPASS")
+	_ = os.Unsetenv("MDM_PUBLIC_URL")
+	_ = os.Unsetenv("MDM_TOPIC")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.MDMEnqueue != "stub" {
+		t.Fatalf("MDMEnqueue=%s", cfg.MDMEnqueue)
 	}
 	if cfg.HTTPAddr != ":8080" {
 		t.Fatalf("HTTPAddr=%s", cfg.HTTPAddr)

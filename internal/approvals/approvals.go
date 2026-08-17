@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/devicepush"
 	"github.com/dwdmsh/school-mdm/internal/mdm"
+	"github.com/dwdmsh/school-mdm/internal/notify"
 	"github.com/dwdmsh/school-mdm/internal/policy"
-	"github.com/dwdmsh/school-mdm/internal/profiles"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
@@ -17,6 +17,8 @@ import (
 type Service struct {
 	Store     store.Store
 	Enqueue   mdm.CommandEnqueuer
+	Push      *devicepush.Service // preferred reconcile path; falls back to Enqueue
+	Notify    *notify.Service    // optional Expo push for students
 	PortalURL string
 	Credits   CreditSpender // optional; when set, access requests cost credits
 }
@@ -145,6 +147,7 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 				return store.Request{}, fmt.Errorf("denied but refund failed: %w", err)
 			}
 		}
+		s.notifyDecided(ctx, req)
 		return req, nil
 	}
 
@@ -189,6 +192,7 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 				return store.Request{}, fmt.Errorf("approved but enqueue failed for %s: %w", enrollmentID, err)
 			}
 		}
+		s.notifyDecided(ctx, req)
 		return req, nil
 
 	case store.TypeBug, store.TypeGeneral:
@@ -197,6 +201,7 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 		if err := s.Store.UpdateRequest(ctx, req); err != nil {
 			return store.Request{}, err
 		}
+		s.notifyDecided(ctx, req)
 		return req, nil
 
 	default:
@@ -253,7 +258,17 @@ func (s *Service) PostMessage(ctx context.Context, in PostMessageInput) (store.R
 			return store.RequestMessage{}, err
 		}
 	}
+	if in.AuthorRole == store.AuthorAdmin && s.Notify != nil {
+		s.Notify.AdminMessage(ctx, req.EnrollmentID, body)
+	}
 	return msg, nil
+}
+
+func (s *Service) notifyDecided(ctx context.Context, req store.Request) {
+	if s.Notify == nil {
+		return
+	}
+	s.Notify.RequestDecided(ctx, req.EnrollmentID, string(req.Status), req.Value)
 }
 
 func resolveApproveTarget(in DecideInput, req store.Request) (policy.Target, error) {
@@ -345,70 +360,27 @@ func (s *Service) devicesAffectedBy(ctx context.Context, target policy.Target, r
 
 // EffectiveAllowlist returns merged apps and URLs for a device.
 func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (apps, urls []string, err error) {
-	var (
-		base   []policy.Entry
-		grants []policy.Grant
-		groups []string
-		err1   error
-		err2   error
-		err3   error
-		wg     sync.WaitGroup
-	)
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		base, err1 = s.Store.ListAllowlist(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		grants, err2 = s.Store.ListGrants(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		groups, err3 = s.Store.ListGroupsForDevice(ctx, enrollmentID)
-	}()
-	wg.Wait()
-	if err1 != nil {
-		return nil, nil, err1
+	if s.Push != nil {
+		return s.Push.EffectiveAllowlist(ctx, enrollmentID)
 	}
-	if err2 != nil {
-		return nil, nil, err2
-	}
-	if err3 != nil {
-		return nil, nil, err3
-	}
-	apps, urls = policy.Effective(base, grants, groups, enrollmentID, time.Now().UTC())
-	return apps, urls, nil
+	return (&devicepush.Service{Store: s.Store}).EffectiveAllowlist(ctx, enrollmentID)
 }
 
 func (s *Service) pushAllowlistProfile(ctx context.Context, enrollmentID string) error {
-	apps, urls, err := s.EffectiveAllowlist(ctx, enrollmentID)
-	if err != nil {
-		return err
+	if s.Push != nil {
+		return s.Push.Reconcile(ctx, enrollmentID)
 	}
-	profile, err := profiles.BuildAllowlistProfile("School Allowlists", apps, urls)
-	if err != nil {
-		return err
-	}
-	if s.Enqueue == nil {
-		return fmt.Errorf("command enqueuer is not configured")
-	}
-	if enrollmentID == "" {
-		enrollmentID = "unassigned"
-	}
-	return s.Enqueue.InstallProfile(ctx, enrollmentID, profile)
+	push := &devicepush.Service{Store: s.Store, Enqueue: s.Enqueue, PortalURL: s.PortalURL}
+	return push.Reconcile(ctx, enrollmentID)
 }
 
 // EnsureWebClip enqueues the Request Access Web Clip for a device-scoped portal URL.
 func (s *Service) EnsureWebClip(ctx context.Context, enrollmentID string) error {
-	raw, err := profiles.BuildRequestWebClipProfile(profiles.DevicePortalURL(s.PortalURL, enrollmentID))
-	if err != nil {
-		return err
+	if s.Push != nil {
+		return s.Push.EnsureWebClip(ctx, enrollmentID)
 	}
-	if enrollmentID == "" {
-		enrollmentID = "unassigned"
-	}
-	return s.Enqueue.InstallProfile(ctx, enrollmentID, raw)
+	push := &devicepush.Service{Store: s.Store, Enqueue: s.Enqueue, PortalURL: s.PortalURL}
+	return push.EnsureWebClip(ctx, enrollmentID)
 }
 
 func parseDuration(d string, now time.Time) (expires *time.Time, permanent bool, err error) {

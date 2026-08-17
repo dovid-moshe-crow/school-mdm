@@ -6,7 +6,7 @@
     <title>ניהול בית ספר</title>
     <script type="module">
       if (import.meta.env.DEV) {
-        import('react-grab')
+        import('react-grab').then(() => import('@react-grab/mcp/client').then((m) => m.attachMcpPlugin()))
       }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

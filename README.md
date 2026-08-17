@@ -1,8 +1,8 @@
 # School MDM
 
-Go + Neon (optional) school iOS MDM control plane: allowlists, access requests, and profile generation.
+Go + Neon (optional) school iOS MDM: allowlists, access requests, credits, **and** an additive Apple MDM protocol plane (NanoMDM + SCEP + APNs).
 
-Nano protocol libraries will be wired for real device enrollments later. This phase runs without APNs or hardware — Approve/Deny uses a stub command enqueuer.
+Default `MDM_ENQUEUE=stub` keeps Approve/Deny offline. Set `MDM_ENQUEUE=live` with `DATABASE_URL` + `MDM_SCEP_CAPASS` to serve `/mdm`, `/scep`, `/enroll` and push real profiles. Continuity/import docs: [`docs/mdm-continuity.md`](docs/mdm-continuity.md).
 
 ## Requirements
 
@@ -67,9 +67,16 @@ Claim the DB to your Neon account (optional, keeps it permanently) using `PUBLIC
 | POST | `/api/requests/{id}/deny` | deny (admin) |
 | GET | `/api/allowlist` | effective allowlist |
 | GET | `/api/stub-commands` | profiles the stub would have pushed |
+| GET | `/version` | MDM version JSON (when live) |
+| GET | `/enroll` | enrollment mobileconfig (when configured) |
+| * | `/mdm`, `/scep` | Apple MDM + SCEP (when `MDM_ENQUEUE=live`) |
+| GET | `/api/mdm/status` | MDM status |
+| GET/POST | `/api/mdm/devices/...` | thin MDM admin (Bearer `ADMIN_TOKENS`) |
 
-Access approvals update allowlists and stub-enqueue a profile. General/bug tickets only change status.
+Access approvals update allowlists and enqueue a profile (`devicepush.Reconcile`). Allowance CRUD also reconciles. General/bug tickets only change status.
 App metadata is cached in `app_metadata` and refreshed from the iTunes Search/Lookup API.
+
+Import nanok continuity data: `go run ./cmd/mdmimport -src "$NANOK_DATABASE_URL" -dst "$DATABASE_URL"` (see `docs/mdm-continuity.md`).
 
 ## Credits + Nedarim Plus
 
@@ -83,6 +90,11 @@ Denied access requests refund the credit.
 | `NEDARIM_API_VALID` | | Required for live |
 | `NEDARIM_API_PASSWORD` | | Optional; used when creating DebitIframe transactions |
 | `CREDITS_ACCESS_COST` | `1` | Credits spent per access request |
+| `MDM_ENQUEUE` | `stub` | `live` enables protocol + APNs enqueue |
+| `MDM_PUBLIC_URL` | | HTTPS base for `/enroll` profile URLs |
+| `MDM_TOPIC` | | APNs MDM topic |
+| `MDM_SCEP_CAPASS` | | Required for live (encrypts/decrypts SCEP CA key) |
+| `MDM_CHECKIN` | `false` | Separate `/checkin` if production profiles used it |
 
 ### Fake payment flow (local)
 
@@ -96,4 +108,4 @@ Packages seeded: 10 / 50 / 100 credits (₪10 / ₪45 / ₪80). Admins can gift 
 
 ## Layout
 
-See `internal/` — `policy` and `approvals` have no HTTP or Nano imports.
+See `docs/mdm-structure.md`. School domain packages (`policy`, `approvals`, `credits`) stay free of HTTP/protocol imports; MDM lives under `mdmhub` / `mdmstore` / `devicepush`.

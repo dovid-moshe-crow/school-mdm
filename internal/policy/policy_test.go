@@ -5,6 +5,34 @@ import (
 	"time"
 )
 
+func TestNormalizePreservesAppBundleCase(t *testing.T) {
+	got := Normalize(KindApp, "  ph.telegra.Telegraph ")
+	if got != "ph.telegra.Telegraph" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEffectivePrefersCanonicalAppCasing(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	base := []Entry{
+		{Kind: KindApp, Value: "ph.telegra.telegraph", Target: Target{Type: TargetGlobal}},
+		{Kind: KindApp, Value: "ph.telegra.Telegraph", Target: Target{Type: TargetDevice, ID: "dev-a"}},
+	}
+	apps, _ := Effective(base, nil, nil, "dev-a", now)
+	found := false
+	for _, a := range apps {
+		if a == "ph.telegra.Telegraph" {
+			found = true
+		}
+		if a == "ph.telegra.telegraph" {
+			t.Fatalf("lowercased duplicate should be collapsed: %v", apps)
+		}
+	}
+	if !found {
+		t.Fatalf("expected canonical casing in %v", apps)
+	}
+}
+
 func TestEffectiveUnionAcrossGroupsAndDevice(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	exp := now.Add(time.Hour)
@@ -25,6 +53,7 @@ func TestEffectiveUnionAcrossGroupsAndDevice(t *testing.T) {
 
 	apps, urls := Effective(base, grants, []string{"g-math", "g-art"}, "dev-a", now)
 	assertContains(t, apps, "com.apple.mobilesafari")
+	assertContains(t, apps, "com.kfilter.portal")
 	assertContains(t, apps, "com.school.learn")
 	assertContains(t, apps, "com.school.art")
 	assertContains(t, apps, "com.school.onlya")

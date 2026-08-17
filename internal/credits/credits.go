@@ -87,10 +87,26 @@ func (s *Service) loadSettings(ctx context.Context) (store.CreditSettings, error
 	return settings, nil
 }
 
+// CreditsEnabled reports whether credit spend / purchase is active.
+func (s *Service) CreditsEnabled(ctx context.Context) bool {
+	settings, err := s.loadSettings(ctx)
+	if err != nil {
+		return true // fail open to historical default until settings exist
+	}
+	return settings.Enabled
+}
+
 // AccessRequestCost returns the effective spend cost (DB settings, else env default).
+// Returns 0 when credits are disabled so requests are free and UIs can hide purchase.
 func (s *Service) AccessRequestCost(ctx context.Context) int {
 	settings, err := s.loadSettings(ctx)
-	if err != nil || settings.AccessRequestCost < 1 {
+	if err != nil {
+		return s.defaultAccessCost()
+	}
+	if !settings.Enabled {
+		return 0
+	}
+	if settings.AccessRequestCost < 1 {
 		return s.defaultAccessCost()
 	}
 	return settings.AccessRequestCost
@@ -153,6 +169,9 @@ func (s *Service) SpendForAccessRequest(ctx context.Context, enrollmentID, reque
 		return fmt.Errorf("enrollment_id and request_id are required")
 	}
 	cost := s.AccessRequestCost(ctx)
+	if cost < 1 {
+		return nil
+	}
 	_, err := s.Store.AdjustCredits(ctx, store.AdjustCreditsInput{
 		EnrollmentID: enrollmentID,
 		Delta:        -cost,
@@ -177,6 +196,9 @@ func (s *Service) RefundForDeniedRequest(ctx context.Context, enrollmentID, requ
 		return fmt.Errorf("enrollment_id and request_id are required")
 	}
 	cost := s.AccessRequestCost(ctx)
+	if cost < 1 {
+		return nil
+	}
 	_, err := s.Store.AdjustCredits(ctx, store.AdjustCreditsInput{
 		EnrollmentID: enrollmentID,
 		Delta:        cost,
@@ -264,7 +286,21 @@ func (s *Service) StartCheckout(ctx context.Context, enrollmentID, packageID str
 		provider = store.ProviderNedarim
 	}
 
+	callback := s.webhookURL()
+	if s.Nedarim == nil {
+		return CheckoutResult{}, fmt.Errorf("nedarim client is not configured")
+	}
 	clientUnique := uuid.NewString()
+	txn, err := s.Nedarim.CreateDebitIframe(ctx, nedarim.CreateTxnInput{
+		AmountAgorot:   pkg.PriceAgorot,
+		ClientUniqueID: clientUnique,
+		CallbackURL:    callback,
+		Comment:        fmt.Sprintf("credits:%d package:%s", pkg.Credits, pkg.NameHe),
+	})
+	if err != nil {
+		return CheckoutResult{}, err
+	}
+
 	purchase, err := s.Store.CreateCreditPurchase(ctx, store.CreditPurchase{
 		EnrollmentID:   enrollmentID,
 		PackageID:      pkg.ID,
@@ -272,30 +308,11 @@ func (s *Service) StartCheckout(ctx context.Context, enrollmentID, packageID str
 		AmountAgorot:   pkg.PriceAgorot,
 		Status:         store.PurchasePending,
 		Provider:       provider,
+		ProviderTxID:   txn.ProviderTxID,
 		ClientUniqueID: clientUnique,
 	})
 	if err != nil {
 		return CheckoutResult{}, err
-	}
-
-	callback := s.webhookURL()
-	if s.Nedarim == nil {
-		return CheckoutResult{}, fmt.Errorf("nedarim client is not configured")
-	}
-	txn, err := s.Nedarim.CreateDebitIframe(ctx, nedarim.CreateTxnInput{
-		AmountAgorot:   purchase.AmountAgorot,
-		ClientUniqueID: purchase.ClientUniqueID,
-		CallbackURL:    callback,
-		Comment:        fmt.Sprintf("credits:%d package:%s", purchase.Credits, pkg.NameHe),
-		PurchaseID:     purchase.ID,
-	})
-	if err != nil {
-		return CheckoutResult{}, err
-	}
-	if txn.ProviderTxID != "" {
-		purchase.ProviderTxID = txn.ProviderTxID
-		// Best-effort persist provider tx id without marking paid.
-		_ = s.persistProviderTx(ctx, purchase)
 	}
 
 	return CheckoutResult{
@@ -303,14 +320,6 @@ func (s *Service) StartCheckout(ctx context.Context, enrollmentID, packageID str
 		IframeURL: txn.IframeURL,
 		Mode:      txn.Mode,
 	}, nil
-}
-
-func (s *Service) persistProviderTx(ctx context.Context, p store.CreditPurchase) error {
-	// Memory/postgres don't expose a generic update; re-create path isn't needed for fake.
-	// Live bridge reads ClientUniqueID; ProviderTxID is optional.
-	_ = ctx
-	_ = p
-	return nil
 }
 
 func (s *Service) webhookURL() string {
@@ -357,23 +366,21 @@ type WebhookPayload struct {
 }
 
 // HandleWebhook marks a purchase paid and credits the ledger (idempotent).
+// Refusals/errors return the pending purchase with nil error so Nedarim gets HTTP 200
+// and does not retry forever — credits are only applied on success.
 func (s *Service) HandleWebhook(ctx context.Context, payload WebhookPayload) (store.CreditPurchase, error) {
 	clientUnique := strings.TrimSpace(payload.ClientUniqueID)
 	if clientUnique == "" {
 		return store.CreditPurchase{}, fmt.Errorf("missing ClientUniqueId / Param2")
 	}
-	status := strings.ToLower(strings.TrimSpace(payload.Status))
-	if status == "error" || status == "fail" || status == "failed" || status == "refusal" {
-		p, err := s.Store.GetCreditPurchaseByClientUnique(ctx, clientUnique)
-		if err != nil {
-			return store.CreditPurchase{}, err
-		}
-		return p, fmt.Errorf("payment failed: %s", payload.Status)
-	}
-
 	p, err := s.Store.GetCreditPurchaseByClientUnique(ctx, clientUnique)
 	if err != nil {
 		return store.CreditPurchase{}, err
+	}
+	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	switch status {
+	case "error", "fail", "failed", "refusal", "refused", "cancel", "cancelled", "canceled":
+		return p, nil
 	}
 	paid, _, err := s.Store.MarkPurchasePaid(ctx, store.MarkPurchasePaidInput{
 		PurchaseID:   p.ID,
@@ -440,14 +447,15 @@ func (s *Service) LiveBridgeParams(ctx context.Context, clientUniqueID string) (
 	}
 	amountShekels := fmt.Sprintf("%.2f", float64(p.AmountAgorot)/100.0)
 	return map[string]string{
-		"Mosad":       s.Nedarim.Cfg.MosadID,
-		"ApiValid":    s.Nedarim.Cfg.ApiValid,
-		"Amount":      amountShekels,
-		"Currency":    "1",
-		"Tashlumim":   "1",
-		"PaymentType": "Ragil",
-		"Param2":      p.ClientUniqueID,
-		"CallBack":    s.webhookURL(),
-		"Comment":     fmt.Sprintf("credits:%d", p.Credits),
+		"Mosad":         s.Nedarim.Cfg.MosadID,
+		"ApiValid":      s.Nedarim.Cfg.ApiValid,
+		"Amount":        amountShekels,
+		"Currency":      "1",
+		"Tashlumim":     "1",
+		"PaymentType":   "Ragil",
+		"Param2":        p.ClientUniqueID,
+		"CallBack":      s.webhookURL(),
+		"Comment":       fmt.Sprintf("credits:%d", p.Credits),
+		"TransactionId": strings.TrimSpace(p.ProviderTxID),
 	}, p, nil
 }

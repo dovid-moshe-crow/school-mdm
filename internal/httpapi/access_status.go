@@ -193,13 +193,13 @@ func (a *API) buildAccessIndex(r *http.Request, enrollment string) (*accessIndex
 	}
 
 	for _, v := range apps {
-		idx.allowed[v] = struct{}{}
+		idx.allowed[policy.AppKey(v)] = struct{}{}
 	}
 	for _, req := range reqs {
 		if req.Type != store.TypeAccess || req.TargetKind != policy.KindApp {
 			continue
 		}
-		v := policy.Normalize(policy.KindApp, req.Value)
+		v := policy.AppKey(req.Value)
 		if req.Status == store.StatusPending {
 			idx.pending[v] = struct{}{}
 		} else if req.Status == store.StatusDenied {
@@ -210,7 +210,7 @@ func (a *API) buildAccessIndex(r *http.Request, enrollment string) (*accessIndex
 }
 
 func (idx *accessIndex) status(bundleID string) string {
-	v := policy.Normalize(policy.KindApp, bundleID)
+	v := policy.AppKey(bundleID)
 	if _, ok := idx.allowed[v]; ok {
 		return "allowed"
 	}

@@ -1,7 +1,10 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -422,6 +425,174 @@ func (s *Store) UpsertCreditSettings(ctx context.Context, settings store.CreditS
 	return settings, nil
 }
 
+func (s *Store) GetMDMSettings(ctx context.Context) (store.MDMSettings, error) {
+	var settings store.MDMSettings
+	var vpp []byte
+	var vppUpdated *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT dep_name,
+			COALESCE(dep_profile_uuid, ''),
+			COALESCE(companion_bundle_id, 'com.kfilter.portal'),
+			COALESCE(companion_itunes_id, 0),
+			COALESCE(companion_enabled, TRUE),
+			COALESCE(lock_screen_enabled, TRUE),
+			COALESCE(lock_screen_footnote, ''),
+			vpp_token,
+			COALESCE(vpp_token_filename, ''),
+			vpp_token_updated_at,
+			updated_at
+		FROM mdm_settings WHERE id=1
+	`).Scan(
+		&settings.DepName,
+		&settings.DEPProfileUUID,
+		&settings.CompanionBundleID,
+		&settings.CompanionITunesID,
+		&settings.CompanionEnabled,
+		&settings.LockScreenEnabled,
+		&settings.LockScreenFootnote,
+		&vpp,
+		&settings.VPPTokenFilename,
+		&vppUpdated,
+		&settings.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return store.MDMSettings{}, fmt.Errorf("mdm settings: %w", store.ErrNotFound)
+	}
+	if err != nil {
+		return store.MDMSettings{}, err
+	}
+	settings.VPPToken = vpp
+	settings.HasVPPToken = len(vpp) > 0
+	settings.VPPTokenUpdatedAt = vppUpdated
+	return settings, nil
+}
+
+func (s *Store) UpsertMDMSettings(ctx context.Context, settings store.MDMSettings) (store.MDMSettings, error) {
+	name := strings.TrimSpace(settings.DepName)
+	if name == "" {
+		return store.MDMSettings{}, fmt.Errorf("dep_name required")
+	}
+	if len(name) > 64 {
+		return store.MDMSettings{}, fmt.Errorf("dep_name too long")
+	}
+	bundle := strings.TrimSpace(settings.CompanionBundleID)
+	if bundle == "" {
+		bundle = "com.kfilter.portal"
+	}
+	// Preserve existing VPP token when caller omits it (nil). Empty slice clears.
+	existing, err := s.GetMDMSettings(ctx)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return store.MDMSettings{}, err
+	}
+	vpp := settings.VPPToken
+	vppFilename := strings.TrimSpace(settings.VPPTokenFilename)
+	if settings.VPPToken == nil && err == nil {
+		vpp = existing.VPPToken
+		if vppFilename == "" {
+			vppFilename = existing.VPPTokenFilename
+		}
+	}
+	var vppUpdated any
+	if len(vpp) > 0 {
+		vppUpdated = time.Now().UTC()
+		if err == nil && existing.VPPTokenUpdatedAt != nil && bytes.Equal(vpp, existing.VPPToken) {
+			vppUpdated = *existing.VPPTokenUpdatedAt
+		}
+	}
+	footnote := strings.TrimSpace(settings.LockScreenFootnote)
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO mdm_settings (
+			id, dep_name, dep_profile_uuid, companion_bundle_id, companion_itunes_id, companion_enabled,
+			lock_screen_enabled, lock_screen_footnote,
+			vpp_token, vpp_token_filename, vpp_token_updated_at, updated_at
+		)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+		ON CONFLICT (id) DO UPDATE SET
+			dep_name = EXCLUDED.dep_name,
+			dep_profile_uuid = EXCLUDED.dep_profile_uuid,
+			companion_bundle_id = EXCLUDED.companion_bundle_id,
+			companion_itunes_id = EXCLUDED.companion_itunes_id,
+			companion_enabled = EXCLUDED.companion_enabled,
+			lock_screen_enabled = EXCLUDED.lock_screen_enabled,
+			lock_screen_footnote = EXCLUDED.lock_screen_footnote,
+			vpp_token = EXCLUDED.vpp_token,
+			vpp_token_filename = EXCLUDED.vpp_token_filename,
+			vpp_token_updated_at = EXCLUDED.vpp_token_updated_at,
+			updated_at = now()
+		RETURNING dep_name,
+			dep_profile_uuid,
+			companion_bundle_id,
+			companion_itunes_id,
+			companion_enabled,
+			lock_screen_enabled,
+			lock_screen_footnote,
+			vpp_token,
+			vpp_token_filename,
+			vpp_token_updated_at,
+			updated_at
+	`, name, strings.TrimSpace(settings.DEPProfileUUID), bundle, settings.CompanionITunesID, settings.CompanionEnabled,
+		settings.LockScreenEnabled, footnote,
+		vpp, vppFilename, vppUpdated,
+	).Scan(
+		&settings.DepName,
+		&settings.DEPProfileUUID,
+		&settings.CompanionBundleID,
+		&settings.CompanionITunesID,
+		&settings.CompanionEnabled,
+		&settings.LockScreenEnabled,
+		&settings.LockScreenFootnote,
+		&settings.VPPToken,
+		&settings.VPPTokenFilename,
+		&settings.VPPTokenUpdatedAt,
+		&settings.UpdatedAt,
+	)
+	if err != nil {
+		return store.MDMSettings{}, err
+	}
+	settings.HasVPPToken = len(settings.VPPToken) > 0
+	return settings, nil
+}
+
+func (s *Store) GetABMDeviceCache(ctx context.Context) (store.ABMDeviceCache, error) {
+	var out store.ABMDeviceCache
+	var synced *time.Time
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT devices, synced_at FROM abm_device_cache WHERE id = 1
+	`).Scan(&raw, &synced)
+	if err == pgx.ErrNoRows {
+		return store.ABMDeviceCache{Devices: json.RawMessage(`[]`)}, nil
+	}
+	if err != nil {
+		return store.ABMDeviceCache{}, err
+	}
+	if len(raw) == 0 {
+		raw = []byte(`[]`)
+	}
+	out.Devices = raw
+	out.SyncedAt = synced
+	return out, nil
+}
+
+func (s *Store) SaveABMDeviceCache(ctx context.Context, devices json.RawMessage) (store.ABMDeviceCache, error) {
+	if len(devices) == 0 {
+		devices = json.RawMessage(`[]`)
+	}
+	var synced time.Time
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO abm_device_cache (id, devices, synced_at)
+		VALUES (1, $1::jsonb, now())
+		ON CONFLICT (id) DO UPDATE SET
+			devices = EXCLUDED.devices,
+			synced_at = now()
+		RETURNING synced_at
+	`, string(devices)).Scan(&synced)
+	if err != nil {
+		return store.ABMDeviceCache{}, err
+	}
+	return store.ABMDeviceCache{Devices: devices, SyncedAt: &synced}, nil
+}
+
 func (s *Store) CreateCreditPurchase(ctx context.Context, p store.CreditPurchase) (store.CreditPurchase, error) {
 	if p.ID == "" {
 		p.ID = uuid.NewString()
@@ -458,6 +629,56 @@ func (s *Store) GetCreditPurchaseByClientUnique(ctx context.Context, clientUniqu
 		SELECT id, enrollment_id, package_id, credits, amount_agorot, status, provider, provider_tx_id, client_unique_id, created_at, paid_at
 		FROM credit_purchases WHERE client_unique_id=$1
 	`, clientUniqueID)
+}
+
+func (s *Store) ListCreditPurchases(ctx context.Context, f store.CreditPurchaseFilter) ([]store.CreditPurchase, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	var b strings.Builder
+	args := make([]any, 0, 6)
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	b.WriteString(`
+		SELECT id, enrollment_id, package_id, credits, amount_agorot, status, provider, provider_tx_id, client_unique_id, created_at, paid_at
+		FROM credit_purchases
+		WHERE 1=1
+	`)
+	if e := strings.TrimSpace(f.EnrollmentID); e != "" {
+		b.WriteString(" AND enrollment_id = " + arg(e))
+	}
+	if st := strings.TrimSpace(f.Status); st != "" {
+		b.WriteString(" AND status = " + arg(st))
+	}
+	b.WriteString(" ORDER BY COALESCE(paid_at, created_at) DESC, created_at DESC LIMIT " + arg(limit) + " OFFSET " + arg(offset))
+
+	rows, err := s.pool.Query(ctx, b.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.CreditPurchase
+	for rows.Next() {
+		var p store.CreditPurchase
+		var status, provider string
+		if err := rows.Scan(
+			&p.ID, &p.EnrollmentID, &p.PackageID, &p.Credits, &p.AmountAgorot,
+			&status, &provider, &p.ProviderTxID, &p.ClientUniqueID, &p.CreatedAt, &p.PaidAt,
+		); err != nil {
+			return nil, err
+		}
+		p.Status = store.PurchaseStatus(status)
+		p.Provider = store.PaymentProvider(provider)
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) scanPurchase(ctx context.Context, q string, arg string) (store.CreditPurchase, error) {

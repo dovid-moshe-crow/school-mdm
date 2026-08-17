@@ -48,6 +48,8 @@ func (a *API) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.auditAdmin(r, store.ActivityCategoryGroups, "group_create", "נוצרה קבוצה",
+		map[string]any{"group_id": g.ID, "name": g.Name}, "", g.ID)
 	writeJSON(w, http.StatusCreated, g)
 }
 
@@ -88,11 +90,14 @@ func (a *API) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.auditAdmin(r, store.ActivityCategoryGroups, "group_update", "עודכנה קבוצה",
+		map[string]any{"group_id": existing.ID, "name": existing.Name}, "", existing.ID)
 	writeJSON(w, http.StatusOK, existing)
 }
 
 func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
-	if err := a.Store.DeleteGroup(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := a.Store.DeleteGroup(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 			return
@@ -100,6 +105,8 @@ func (a *API) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	a.auditAdmin(r, store.ActivityCategoryGroups, "group_delete", "נמחקה קבוצה",
+		map[string]any{"group_id": id}, "", id)
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
@@ -130,6 +137,18 @@ func (a *API) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	before, _ := a.Store.ListGroupMembers(r.Context(), id)
+	beforeSet := map[string]struct{}{}
+	for _, e := range before {
+		beforeSet[e] = struct{}{}
+	}
+	afterSet := map[string]struct{}{}
+	for _, e := range body.EnrollmentIDs {
+		e = strings.TrimSpace(e)
+		if e != "" {
+			afterSet[e] = struct{}{}
+		}
+	}
 	if err := a.Store.SetGroupMembers(r.Context(), id, body.EnrollmentIDs); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -137,6 +156,26 @@ func (a *API) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	var touched []string
+	for e := range afterSet {
+		if _, ok := beforeSet[e]; !ok {
+			a.auditAction(r, actionGroupMemberAdd, map[string]any{
+				"group_id": id, "enrollment_id": e,
+			})
+			touched = append(touched, e)
+		}
+	}
+	for e := range beforeSet {
+		if _, ok := afterSet[e]; !ok {
+			a.auditAction(r, actionGroupMemberRemove, map[string]any{
+				"group_id": id, "enrollment_id": e,
+			})
+			touched = append(touched, e)
+		}
+	}
+	if a.Push != nil && len(touched) > 0 {
+		_ = a.Push.ReconcileMany(r.Context(), touched)
 	}
 	members, err := a.Store.ListGroupMembers(r.Context(), id)
 	if err != nil {
@@ -171,6 +210,12 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "value is required"})
 		return
 	}
+	// Prefer Apple's exact bundle-ID casing for MDM allowListedAppBundleIDs.
+	if kind == policy.KindApp && a.Catalog != nil {
+		if meta, err := a.Catalog.LookupBundle(r.Context(), value); err == nil && meta.BundleID != "" {
+			value = meta.BundleID
+		}
+	}
 	target, err := parseAllowanceTarget(body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -189,6 +234,9 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		a.auditAction(r, actionAllowlistAdd, map[string]any{
+			"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+		})
 	} else {
 		if err := a.Store.AddGrant(r.Context(), policy.Grant{
 			Kind: kind, Value: value, Target: target, ExpiresAt: expires,
@@ -196,18 +244,71 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		a.auditAction(r, actionAllowlistAdd, map[string]any{
+			"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+		})
 	}
 	if kind == policy.KindApp && a.Catalog != nil {
 		_, _ = a.Catalog.LookupBundle(r.Context(), value)
 	}
+	enqueueErr := a.reconcileAllowanceTarget(r, target)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"kind":        kind,
-		"value":       value,
-		"target_type": target.Type,
-		"target_id":   target.ID,
-		"permanent":   permanent,
-		"expires_at":  expires,
+		"kind":          kind,
+		"value":         value,
+		"target_type":   target.Type,
+		"target_id":     target.ID,
+		"permanent":     permanent,
+		"expires_at":    expires,
+		"enqueue_error": enqueueErr,
 	})
+}
+
+func (a *API) reconcileAllowanceTarget(r *http.Request, target policy.Target) string {
+	if a.Push == nil {
+		return ""
+	}
+	devices, err := a.devicesForTarget(r, target)
+	if err != nil {
+		return err.Error()
+	}
+	if err := a.Push.ReconcileMany(r.Context(), devices); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (a *API) devicesForTarget(r *http.Request, target policy.Target) ([]string, error) {
+	switch target.Type {
+	case policy.TargetDevice:
+		if target.ID == "" {
+			return []string{"unassigned"}, nil
+		}
+		return []string{target.ID}, nil
+	case policy.TargetGroup:
+		return a.Store.ListEnrollmentIDsForGroup(r.Context(), target.ID)
+	case policy.TargetGlobal:
+		ids, err := a.Store.ListAllEnrollmentIDs(r.Context())
+		if err != nil {
+			return nil, err
+		}
+		if a.MDMStore != nil {
+			ens, err := a.MDMStore.ListEnrollments(r.Context())
+			if err == nil {
+				seen := map[string]struct{}{}
+				for _, id := range ids {
+					seen[id] = struct{}{}
+				}
+				for _, e := range ens {
+					if _, ok := seen[e.ID]; !ok {
+						ids = append(ids, e.ID)
+					}
+				}
+			}
+		}
+		return ids, nil
+	default:
+		return nil, nil
+	}
 }
 
 func parseAllowanceTarget(body createAllowanceBody) (policy.Target, error) {
@@ -284,5 +385,9 @@ func (a *API) handleDeleteAllowance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+	a.auditAction(r, actionAllowlistRemove, map[string]any{
+		"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+	})
+	enqueueErr := a.reconcileAllowanceTarget(r, target)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enqueue_error": enqueueErr})
 }

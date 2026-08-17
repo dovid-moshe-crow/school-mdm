@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/policy"
@@ -91,10 +92,91 @@ type Group struct {
 	MemberCount int       `json:"member_count,omitempty"`
 }
 
-// Device is an enrollment with an optional display name.
+// WhitelistPack is a named set of apps/URLs (e.g. "Games") assignable to targets.
+type WhitelistPack struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	ItemCount   int       `json:"item_count,omitempty"`
+}
+
+// WhitelistPackItem is one app or URL inside a pack.
+type WhitelistPackItem struct {
+	PackID string     `json:"pack_id"`
+	Kind   policy.Kind `json:"kind"`
+	Value  string     `json:"value"`
+}
+
+// WhitelistPackAssignment attaches a pack to global / device-group / device.
+type WhitelistPackAssignment struct {
+	PackID     string            `json:"pack_id"`
+	TargetType policy.TargetType `json:"target_type"`
+	TargetID   string            `json:"target_id"`
+}
+
+// Device is an enrollment with optional display name and policy mode.
 type Device struct {
-	EnrollmentID string `json:"enrollment_id"`
-	Name         string `json:"name"`
+	EnrollmentID string   `json:"enrollment_id"`
+	Name         string   `json:"name"`
+	Unrestricted bool     `json:"unrestricted"`
+	SerialNumber string   `json:"serial_number,omitempty"`
+	Enabled      *bool    `json:"enabled,omitempty"`
+	LastSeenAt   string   `json:"last_seen_at,omitempty"`
+	GroupIDs     []string `json:"group_ids,omitempty"`
+	MDM          bool     `json:"mdm,omitempty"`
+}
+
+// Activity categories / results for the Admin audit trail.
+const (
+	ActivityCategoryMDM      = "mdm"
+	ActivityCategoryPolicy   = "policy"
+	ActivityCategoryGroups   = "groups"
+	ActivityCategoryRequests = "requests"
+	ActivityCategoryCredits  = "credits"
+	ActivityCategoryDevices  = "devices"
+	ActivityCategoryABM      = "abm"
+	ActivityCategorySystem   = "system"
+
+	ActivityActorAdmin   = "admin"
+	ActivityActorDevice  = "device"
+	ActivityActorSystem  = "system"
+	ActivityActorWebhook = "webhook"
+
+	ActivityResultOK    = "ok"
+	ActivityResultError = "error"
+	ActivityResultInfo  = "info"
+)
+
+// ActivityEvent is one searchable audit row.
+type ActivityEvent struct {
+	ID           string          `json:"id"`
+	At           time.Time       `json:"at"`
+	Category     string          `json:"category"`
+	Action       string          `json:"action"`
+	ActorType    string          `json:"actor_type"`
+	Actor        string          `json:"actor"`
+	EnrollmentID string          `json:"enrollment_id,omitempty"`
+	GroupID      string          `json:"group_id,omitempty"`
+	RequestID    string          `json:"request_id,omitempty"`
+	CommandUUID  string          `json:"command_uuid,omitempty"`
+	Result       string          `json:"result"`
+	Summary      string          `json:"summary"`
+	Detail       json.RawMessage `json:"detail,omitempty"`
+}
+
+// ActivityFilter selects rows for ListActivityEvents.
+type ActivityFilter struct {
+	From         *time.Time
+	To           *time.Time
+	Category     string
+	Action       string
+	EnrollmentID string
+	ActorType    string
+	Result       string
+	Q            string // summary ILIKE
+	Limit        int
+	Offset       int
 }
 
 // AccessRequest is kept as an alias for older call sites.
@@ -240,6 +322,36 @@ type CreditSettings struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// MDMSettings is the singleton ABM/DEP configuration for this school server.
+type MDMSettings struct {
+	DepName             string     `json:"dep_name"`
+	DEPProfileUUID      string     `json:"dep_profile_uuid,omitempty"`
+	CompanionBundleID   string     `json:"companion_bundle_id"`
+	CompanionITunesID   int64      `json:"companion_itunes_id"`
+	CompanionEnabled    bool       `json:"companion_enabled"`
+	LockScreenEnabled   bool       `json:"lock_screen_enabled"`
+	LockScreenFootnote  string     `json:"lock_screen_footnote"`
+	HasVPPToken         bool       `json:"has_vpp_token"`
+	VPPTokenFilename    string     `json:"vpp_token_filename,omitempty"`
+	VPPTokenUpdatedAt   *time.Time `json:"vpp_token_updated_at,omitempty"`
+	VPPToken            []byte     `json:"-"` // content token bytes; never serialize to clients
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// ABMDeviceCache is the last synced Apple DEP device list for Admin.
+type ABMDeviceCache struct {
+	Devices  json.RawMessage `json:"devices"`
+	SyncedAt *time.Time      `json:"synced_at,omitempty"`
+}
+
+// DevicePushToken is an Expo/APNs push token registered by the KFilter app.
+type DevicePushToken struct {
+	EnrollmentID string    `json:"enrollment_id"`
+	Token        string    `json:"token"`
+	Platform     string    `json:"platform"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 // CreditPurchase is a checkout intent / paid purchase.
 type CreditPurchase struct {
 	ID             string          `json:"id"`
@@ -279,6 +391,14 @@ type MarkPurchasePaidInput struct {
 	ProviderTxID string
 }
 
+// CreditPurchaseFilter selects rows for ListCreditPurchases.
+type CreditPurchaseFilter struct {
+	EnrollmentID string
+	Status       string // pending|paid|failed|expired; empty = all
+	Limit        int
+	Offset       int
+}
+
 // Store persists allowlists, grants, requests, groups, app metadata, and credits.
 type Store interface {
 	Ping(ctx context.Context) error
@@ -287,6 +407,21 @@ type Store interface {
 	ListAllowlist(ctx context.Context) ([]policy.Entry, error)
 	UpsertAllowlist(ctx context.Context, entry policy.Entry) error
 	DeleteAllowlist(ctx context.Context, kind policy.Kind, value string, target policy.Target) error
+
+	ListWhitelistPacks(ctx context.Context) ([]WhitelistPack, error)
+	GetWhitelistPack(ctx context.Context, id string) (WhitelistPack, error)
+	CreateWhitelistPack(ctx context.Context, p WhitelistPack) (WhitelistPack, error)
+	UpdateWhitelistPack(ctx context.Context, p WhitelistPack) error
+	DeleteWhitelistPack(ctx context.Context, id string) error
+	ListWhitelistPackItems(ctx context.Context, packID string) ([]WhitelistPackItem, error)
+	AddWhitelistPackItem(ctx context.Context, item WhitelistPackItem) error
+	RemoveWhitelistPackItem(ctx context.Context, packID string, kind policy.Kind, value string) error
+	ListWhitelistPackAssignments(ctx context.Context, packID string) ([]WhitelistPackAssignment, error)
+	SetWhitelistPackAssignment(ctx context.Context, a WhitelistPackAssignment) error
+	RemoveWhitelistPackAssignment(ctx context.Context, packID string, target policy.Target) error
+	// ListAllowlistFromPacks returns synthetic allowlist entries from packs that apply
+	// to the given device (global + its groups + device assignments).
+	ListAllowlistFromPacks(ctx context.Context, enrollmentID string, groupIDs []string) ([]policy.Entry, error)
 
 	ListGrants(ctx context.Context) ([]policy.Grant, error)
 	AddGrant(ctx context.Context, grant policy.Grant) error
@@ -323,7 +458,13 @@ type Store interface {
 	ListAllEnrollmentIDs(ctx context.Context) ([]string, error)
 
 	ListDevices(ctx context.Context) ([]Device, error)
+	GetDevice(ctx context.Context, enrollmentID string) (Device, error)
 	SetDeviceName(ctx context.Context, enrollmentID, name string) error
+	SetDeviceUnrestricted(ctx context.Context, enrollmentID string, unrestricted bool) error
+	EnsureDevice(ctx context.Context, enrollmentID string) error
+
+	InsertActivityEvent(ctx context.Context, e ActivityEvent) (ActivityEvent, error)
+	ListActivityEvents(ctx context.Context, f ActivityFilter) ([]ActivityEvent, error)
 
 	EnsureCreditBalance(ctx context.Context, enrollmentID string) (DeviceCredits, error)
 	GetCreditBalance(ctx context.Context, enrollmentID string) (DeviceCredits, error)
@@ -339,9 +480,22 @@ type Store interface {
 	GetCreditSettings(ctx context.Context) (CreditSettings, error)
 	UpsertCreditSettings(ctx context.Context, settings CreditSettings) (CreditSettings, error)
 
+	GetMDMSettings(ctx context.Context) (MDMSettings, error)
+	UpsertMDMSettings(ctx context.Context, settings MDMSettings) (MDMSettings, error)
+
+	// Apple DEP device list cache (last successful sync from ASM/ABM).
+	GetABMDeviceCache(ctx context.Context) (ABMDeviceCache, error)
+	SaveABMDeviceCache(ctx context.Context, devices json.RawMessage) (ABMDeviceCache, error)
+
+	UpsertPushToken(ctx context.Context, t DevicePushToken) error
+	ListPushTokens(ctx context.Context, enrollmentID string) ([]DevicePushToken, error)
+	DeletePushToken(ctx context.Context, token string) error
+	HasPushToken(ctx context.Context, enrollmentID string) (bool, error)
+
 	CreateCreditPurchase(ctx context.Context, p CreditPurchase) (CreditPurchase, error)
 	GetCreditPurchase(ctx context.Context, id string) (CreditPurchase, error)
 	GetCreditPurchaseByClientUnique(ctx context.Context, clientUniqueID string) (CreditPurchase, error)
+	ListCreditPurchases(ctx context.Context, f CreditPurchaseFilter) ([]CreditPurchase, error)
 	MarkPurchasePaid(ctx context.Context, in MarkPurchasePaidInput) (CreditPurchase, bool, error)
 
 	ListAllotmentRules(ctx context.Context) ([]CreditAllotmentRule, error)

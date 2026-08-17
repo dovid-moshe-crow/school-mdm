@@ -5,6 +5,9 @@ import { theme } from './theme'
 import Home from './pages/Home'
 import Portal from './pages/Portal'
 import Admin from './pages/Admin'
+import DeviceAdmin from './pages/DeviceAdmin'
+import Privacy from './pages/Privacy'
+import Support from './pages/Support'
 
 export default function App() {
   return (
@@ -12,8 +15,12 @@ export default function App() {
       <AntApp>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/support" element={<Support />} />
           <Route path="/d/:deviceId" element={<Portal />} />
+          <Route path="/d/:deviceId/store" element={<Portal />} />
           <Route path="/admin" element={<Admin />} />
+          <Route path="/admin/devices/:deviceId" element={<DeviceAdmin />} />
         </Routes>
       </AntApp>
     </ConfigProvider>

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -148,6 +149,16 @@ func (s *Store) UpsertAllowlist(ctx context.Context, entry policy.Entry) error {
 	if entry.ID == "" {
 		entry.ID = uuid.NewString()
 	}
+	if entry.Kind == policy.KindApp {
+		// Case-insensitive replace so ph.telegra.telegraph → ph.telegra.Telegraph.
+		_, err := s.pool.Exec(ctx, `
+			DELETE FROM allowlist_entries
+			WHERE kind=$1 AND lower(value)=lower($2) AND target_type=$3 AND target_id=$4
+		`, string(entry.Kind), entry.Value, string(entry.Target.Type), entry.Target.ID)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO allowlist_entries (id, kind, value, target_type, target_id)
 		VALUES ($1, $2, $3, $4, $5)
@@ -159,11 +170,226 @@ func (s *Store) UpsertAllowlist(ctx context.Context, entry policy.Entry) error {
 func (s *Store) DeleteAllowlist(ctx context.Context, kind policy.Kind, value string, target policy.Target) error {
 	value = policy.Normalize(kind, value)
 	normalizeTarget(&target)
+	if kind == policy.KindApp {
+		_, err := s.pool.Exec(ctx, `
+			DELETE FROM allowlist_entries
+			WHERE kind=$1 AND lower(value)=lower($2) AND target_type=$3 AND target_id=$4
+		`, string(kind), value, string(target.Type), target.ID)
+		return err
+	}
 	_, err := s.pool.Exec(ctx, `
 		DELETE FROM allowlist_entries
 		WHERE kind=$1 AND value=$2 AND target_type=$3 AND target_id=$4
 	`, string(kind), value, string(target.Type), target.ID)
 	return err
+}
+
+func (s *Store) ListWhitelistPacks(ctx context.Context) ([]store.WhitelistPack, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id, p.name, p.description, p.created_at,
+		       (SELECT COUNT(*) FROM whitelist_pack_items i WHERE i.pack_id = p.id)
+		FROM whitelist_packs p
+		ORDER BY p.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.WhitelistPack
+	for rows.Next() {
+		var p store.WhitelistPack
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.ItemCount); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetWhitelistPack(ctx context.Context, id string) (store.WhitelistPack, error) {
+	var p store.WhitelistPack
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, name, description, created_at,
+		       (SELECT COUNT(*) FROM whitelist_pack_items i WHERE i.pack_id = whitelist_packs.id)
+		FROM whitelist_packs WHERE id=$1`, strings.TrimSpace(id)).
+		Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.ItemCount)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return store.WhitelistPack{}, store.ErrNotFound
+		}
+		return store.WhitelistPack{}, err
+	}
+	return p, nil
+}
+
+func (s *Store) CreateWhitelistPack(ctx context.Context, p store.WhitelistPack) (store.WhitelistPack, error) {
+	p.Name = strings.TrimSpace(p.Name)
+	if p.Name == "" {
+		return store.WhitelistPack{}, fmt.Errorf("name is required")
+	}
+	if p.ID == "" {
+		p.ID = uuid.NewString()
+	}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO whitelist_packs (id, name, description)
+		VALUES ($1, $2, $3)
+		RETURNING created_at`, p.ID, p.Name, strings.TrimSpace(p.Description)).Scan(&p.CreatedAt)
+	if err != nil {
+		return store.WhitelistPack{}, err
+	}
+	return p, nil
+}
+
+func (s *Store) UpdateWhitelistPack(ctx context.Context, p store.WhitelistPack) error {
+	p.Name = strings.TrimSpace(p.Name)
+	if p.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE whitelist_packs SET name=$2, description=$3 WHERE id=$1`,
+		p.ID, p.Name, strings.TrimSpace(p.Description))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteWhitelistPack(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM whitelist_packs WHERE id=$1`, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListWhitelistPackItems(ctx context.Context, packID string) ([]store.WhitelistPackItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT pack_id, kind, value FROM whitelist_pack_items
+		WHERE pack_id=$1 ORDER BY kind, value`, strings.TrimSpace(packID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.WhitelistPackItem
+	for rows.Next() {
+		var it store.WhitelistPackItem
+		var kind string
+		if err := rows.Scan(&it.PackID, &kind, &it.Value); err != nil {
+			return nil, err
+		}
+		it.Kind = policy.Kind(kind)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AddWhitelistPackItem(ctx context.Context, item store.WhitelistPackItem) error {
+	item.Value = policy.Normalize(item.Kind, item.Value)
+	if item.PackID == "" || item.Value == "" {
+		return fmt.Errorf("pack_id and value required")
+	}
+	if item.Kind == policy.KindApp {
+		_, err := s.pool.Exec(ctx, `
+			DELETE FROM whitelist_pack_items
+			WHERE pack_id=$1 AND kind=$2 AND lower(value)=lower($3)`,
+			item.PackID, string(item.Kind), item.Value)
+		if err != nil {
+			return err
+		}
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO whitelist_pack_items (pack_id, kind, value)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, item.PackID, string(item.Kind), item.Value)
+	return err
+}
+
+func (s *Store) RemoveWhitelistPackItem(ctx context.Context, packID string, kind policy.Kind, value string) error {
+	value = policy.Normalize(kind, value)
+	if kind == policy.KindApp {
+		_, err := s.pool.Exec(ctx, `
+			DELETE FROM whitelist_pack_items WHERE pack_id=$1 AND kind=$2 AND lower(value)=lower($3)`,
+			strings.TrimSpace(packID), string(kind), value)
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM whitelist_pack_items WHERE pack_id=$1 AND kind=$2 AND value=$3`,
+		strings.TrimSpace(packID), string(kind), value)
+	return err
+}
+
+func (s *Store) ListWhitelistPackAssignments(ctx context.Context, packID string) ([]store.WhitelistPackAssignment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT pack_id, target_type, target_id FROM whitelist_pack_assignments
+		WHERE pack_id=$1 ORDER BY target_type, target_id`, strings.TrimSpace(packID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.WhitelistPackAssignment
+	for rows.Next() {
+		var a store.WhitelistPackAssignment
+		var tt string
+		if err := rows.Scan(&a.PackID, &tt, &a.TargetID); err != nil {
+			return nil, err
+		}
+		a.TargetType = policy.TargetType(tt)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetWhitelistPackAssignment(ctx context.Context, a store.WhitelistPackAssignment) error {
+	t := policy.Target{Type: a.TargetType, ID: a.TargetID}
+	normalizeTarget(&t)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO whitelist_pack_assignments (pack_id, target_type, target_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, a.PackID, string(t.Type), t.ID)
+	return err
+}
+
+func (s *Store) RemoveWhitelistPackAssignment(ctx context.Context, packID string, target policy.Target) error {
+	normalizeTarget(&target)
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM whitelist_pack_assignments
+		WHERE pack_id=$1 AND target_type=$2 AND target_id=$3`,
+		strings.TrimSpace(packID), string(target.Type), target.ID)
+	return err
+}
+
+func (s *Store) ListAllowlistFromPacks(ctx context.Context, enrollmentID string, groupIDs []string) ([]policy.Entry, error) {
+	// Packs assigned globally, to any of the device's groups, or to the device.
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT i.kind, i.value
+		FROM whitelist_pack_assignments a
+		INNER JOIN whitelist_pack_items i ON i.pack_id = a.pack_id
+		WHERE a.target_type = 'global'
+		   OR (a.target_type = 'device' AND a.target_id = $1)
+		   OR (a.target_type = 'group' AND a.target_id = ANY($2::text[]))
+	`, strings.TrimSpace(enrollmentID), groupIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []policy.Entry
+	for rows.Next() {
+		var kind, value string
+		if err := rows.Scan(&kind, &value); err != nil {
+			return nil, err
+		}
+		out = append(out, policy.Entry{
+			Kind:   policy.Kind(kind),
+			Value:  value,
+			Target: policy.Target{Type: policy.TargetGlobal}, // already filtered for this device
+		})
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListGrants(ctx context.Context) ([]policy.Grant, error) {
@@ -204,6 +430,13 @@ func (s *Store) AddGrant(ctx context.Context, grant policy.Grant) error {
 func (s *Store) DeleteGrants(ctx context.Context, kind policy.Kind, value string, target policy.Target) error {
 	value = policy.Normalize(kind, value)
 	normalizeTarget(&target)
+	if kind == policy.KindApp {
+		_, err := s.pool.Exec(ctx, `
+			DELETE FROM grants
+			WHERE kind=$1 AND lower(value)=lower($2) AND target_type=$3 AND target_id=$4
+		`, string(kind), value, string(target.Type), target.ID)
+		return err
+	}
 	_, err := s.pool.Exec(ctx, `
 		DELETE FROM grants
 		WHERE kind=$1 AND value=$2 AND target_type=$3 AND target_id=$4
@@ -404,10 +637,12 @@ func scanRequest(row scannable) (store.Request, error) {
 }
 
 func (s *Store) GetAppMeta(ctx context.Context, bundleID string) (store.AppMeta, error) {
+	bundleID = strings.TrimSpace(bundleID)
 	row := s.pool.QueryRow(ctx, `
 		SELECT bundle_id, track_id, name, artist, artwork_url, store_url, updated_at, details
-		FROM app_metadata WHERE bundle_id=$1
-	`, strings.ToLower(strings.TrimSpace(bundleID)))
+		FROM app_metadata WHERE lower(bundle_id)=lower($1)
+		LIMIT 1
+	`, bundleID)
 	var m store.AppMeta
 	var details []byte
 	if err := row.Scan(&m.BundleID, &m.TrackID, &m.Name, &m.Artist, &m.ArtworkURL, &m.StoreURL, &m.UpdatedAt, &details); err != nil {
@@ -421,7 +656,7 @@ func (s *Store) GetAppMeta(ctx context.Context, bundleID string) (store.AppMeta,
 }
 
 func (s *Store) UpsertAppMeta(ctx context.Context, meta store.AppMeta) error {
-	meta.BundleID = strings.ToLower(strings.TrimSpace(meta.BundleID))
+	meta.BundleID = strings.TrimSpace(meta.BundleID)
 	if meta.BundleID == "" {
 		return fmt.Errorf("bundle_id is required")
 	}
@@ -430,6 +665,12 @@ func (s *Store) UpsertAppMeta(ctx context.Context, meta store.AppMeta) error {
 	}
 	details, err := marshalAppDetails(meta)
 	if err != nil {
+		return err
+	}
+	// Drop other casings of the same bundle so the PK can hold Apple's form.
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM app_metadata WHERE lower(bundle_id)=lower($1) AND bundle_id <> $1
+	`, meta.BundleID); err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `
@@ -733,7 +974,7 @@ func (s *Store) ListAllEnrollmentIDs(ctx context.Context) ([]string, error) {
 
 func (s *Store) ListDevices(ctx context.Context) ([]store.Device, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT ids.id, COALESCE(d.name, '') FROM (
+		SELECT ids.id, COALESCE(d.name, ''), COALESCE(d.unrestricted, false) FROM (
 			SELECT enrollment_id AS id FROM requests WHERE enrollment_id <> ''
 			UNION
 			SELECT target_id FROM grants WHERE target_type='device' AND target_id <> ''
@@ -754,12 +995,38 @@ func (s *Store) ListDevices(ctx context.Context) ([]store.Device, error) {
 	var out []store.Device
 	for rows.Next() {
 		var d store.Device
-		if err := rows.Scan(&d.EnrollmentID, &d.Name); err != nil {
+		if err := rows.Scan(&d.EnrollmentID, &d.Name, &d.Unrestricted); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) GetDevice(ctx context.Context, enrollmentID string) (store.Device, error) {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	var d store.Device
+	err := s.pool.QueryRow(ctx, `
+		SELECT enrollment_id, COALESCE(name, ''), COALESCE(unrestricted, false)
+		FROM devices WHERE enrollment_id = $1
+	`, enrollmentID).Scan(&d.EnrollmentID, &d.Name, &d.Unrestricted)
+	if err != nil {
+		return store.Device{}, err
+	}
+	return d, nil
+}
+
+func (s *Store) EnsureDevice(ctx context.Context, enrollmentID string) error {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return fmt.Errorf("enrollment_id is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO devices (enrollment_id, name, unrestricted, updated_at)
+		VALUES ($1, '', false, now())
+		ON CONFLICT (enrollment_id) DO NOTHING
+	`, enrollmentID)
+	return err
 }
 
 func (s *Store) SetDeviceName(ctx context.Context, enrollmentID, name string) error {
@@ -768,9 +1035,137 @@ func (s *Store) SetDeviceName(ctx context.Context, enrollmentID, name string) er
 		return fmt.Errorf("enrollment_id is required")
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO devices (enrollment_id, name, updated_at)
-		VALUES ($1, $2, now())
+		INSERT INTO devices (enrollment_id, name, unrestricted, updated_at)
+		VALUES ($1, $2, false, now())
 		ON CONFLICT (enrollment_id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
 	`, enrollmentID, strings.TrimSpace(name))
 	return err
+}
+
+func (s *Store) SetDeviceUnrestricted(ctx context.Context, enrollmentID string, unrestricted bool) error {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return fmt.Errorf("enrollment_id is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO devices (enrollment_id, name, unrestricted, updated_at)
+		VALUES ($1, '', $2, now())
+		ON CONFLICT (enrollment_id) DO UPDATE SET unrestricted = EXCLUDED.unrestricted, updated_at = now()
+	`, enrollmentID, unrestricted)
+	return err
+}
+
+func (s *Store) InsertActivityEvent(ctx context.Context, e store.ActivityEvent) (store.ActivityEvent, error) {
+	if e.ID == "" {
+		e.ID = uuid.NewString()
+	}
+	if e.Result == "" {
+		e.Result = store.ActivityResultOK
+	}
+	if e.ActorType == "" {
+		e.ActorType = store.ActivityActorSystem
+	}
+	detail := e.Detail
+	if len(detail) == 0 {
+		detail = json.RawMessage(`{}`)
+	}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO activity_events (
+			id, at, category, action, actor_type, actor,
+			enrollment_id, group_id, request_id, command_uuid,
+			result, summary, detail
+		) VALUES (
+			$1, COALESCE($2, now()), $3, $4, $5, $6,
+			NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
+			$11, $12, $13::jsonb
+		)
+		RETURNING at
+	`,
+		e.ID, nullTime(e.At), e.Category, e.Action, e.ActorType, e.Actor,
+		e.EnrollmentID, e.GroupID, e.RequestID, e.CommandUUID,
+		e.Result, e.Summary, string(detail),
+	).Scan(&e.At)
+	if err != nil {
+		return store.ActivityEvent{}, err
+	}
+	e.Detail = detail
+	return e, nil
+}
+
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC()
+}
+
+func (s *Store) ListActivityEvents(ctx context.Context, f store.ActivityFilter) ([]store.ActivityEvent, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var b strings.Builder
+	args := make([]any, 0, 12)
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	b.WriteString(`
+		SELECT id, at, category, action, actor_type, actor,
+			COALESCE(enrollment_id, ''), COALESCE(group_id, ''),
+			COALESCE(request_id, ''), COALESCE(command_uuid, ''),
+			result, summary, detail
+		FROM activity_events
+		WHERE 1=1
+	`)
+	if f.From != nil {
+		b.WriteString(" AND at >= " + arg(f.From.UTC()))
+	}
+	if f.To != nil {
+		b.WriteString(" AND at <= " + arg(f.To.UTC()))
+	}
+	if c := strings.TrimSpace(f.Category); c != "" {
+		b.WriteString(" AND category = " + arg(c))
+	}
+	if a := strings.TrimSpace(f.Action); a != "" {
+		b.WriteString(" AND action = " + arg(a))
+	}
+	if e := strings.TrimSpace(f.EnrollmentID); e != "" {
+		b.WriteString(" AND enrollment_id = " + arg(e))
+	}
+	if at := strings.TrimSpace(f.ActorType); at != "" {
+		b.WriteString(" AND actor_type = " + arg(at))
+	}
+	if r := strings.TrimSpace(f.Result); r != "" {
+		b.WriteString(" AND result = " + arg(r))
+	}
+	if q := strings.TrimSpace(f.Q); q != "" {
+		b.WriteString(" AND summary ILIKE " + arg("%"+q+"%"))
+	}
+	b.WriteString(" ORDER BY at DESC LIMIT " + arg(limit) + " OFFSET " + arg(offset))
+
+	rows, err := s.pool.Query(ctx, b.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.ActivityEvent
+	for rows.Next() {
+		var e store.ActivityEvent
+		if err := rows.Scan(
+			&e.ID, &e.At, &e.Category, &e.Action, &e.ActorType, &e.Actor,
+			&e.EnrollmentID, &e.GroupID, &e.RequestID, &e.CommandUUID,
+			&e.Result, &e.Summary, &e.Detail,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

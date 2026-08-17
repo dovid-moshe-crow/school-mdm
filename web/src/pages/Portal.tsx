@@ -1,6 +1,7 @@
 import {
   Alert,
   App,
+  Badge,
   Button,
   Card,
   Collapse,
@@ -26,8 +27,8 @@ import {
   useQueryStates,
 } from 'nuqs'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
-import { api, type AccessStatus, type AppMeta, type CreditPackage } from '../api'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { api, type AccessStatus, type AppMeta, type CreditPackage, type Request } from '../api'
 import { RequestThread } from '../components/RequestThread'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he, studentNextAction } from '../he'
@@ -35,6 +36,9 @@ import { AppThumb, normalizeHostPreview, useDebounced } from '../ui'
 
 const categories = ['access-url', 'access-app', 'general', 'bug'] as const
 type Category = (typeof categories)[number]
+
+const portalModes = ['store', 'request', 'updates'] as const
+type PortalMode = (typeof portalModes)[number]
 
 const DESC_PREVIEW = 280
 
@@ -68,6 +72,68 @@ function fmtSize(bytes?: number) {
   return `${mb.toFixed(1)} MB`
 }
 
+/** HTTPS App Store product page. Prefer this in Chrome; Safari cannot use it when
+ * the App Store *app* is blocked (hard redirect / Universal Link → itms-appss). */
+function appStoreInstallURL(app: AppMeta): string {
+  if (app.store_url) return app.store_url
+  if (app.track_id) return `https://apps.apple.com/app/id${app.track_id}`
+  return `https://apps.apple.com/search?term=${encodeURIComponent(app.app_name || app.bundle_id)}`
+}
+
+function isIOSDevice(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent || ''
+  if (/iPad|iPhone|iPod/i.test(ua)) return true
+  // iPadOS desktop UA
+  return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1
+}
+
+/** True for Safari / Home Screen web clips — not Chrome/Firefox/Edge on iOS. */
+function isIOSSafariFamily(): boolean {
+  if (!isIOSDevice()) return false
+  const ua = navigator.userAgent || ''
+  if (/CriOS|FxiOS|EdgiOS|OPiOS|Chrome|Android/i.test(ua)) return false
+  const nav = navigator as Navigator & { standalone?: boolean }
+  return /Safari/i.test(ua) || nav.standalone === true
+}
+
+/** Open product page in Chrome so Install works without allowing com.apple.AppStore. */
+function chromeNavigateURL(httpsURL: string): string {
+  const trimmed = httpsURL.trim()
+  if (/^https:\/\//i.test(trimmed)) {
+    return `googlechromes://${trimmed.slice('https://'.length)}`
+  }
+  if (/^http:\/\//i.test(trimmed)) {
+    return `googlechrome://${trimmed.slice('http://'.length)}`
+  }
+  return `googlechromes://${trimmed.replace(/^\/\//, '')}`
+}
+
+function openAppStore(app: AppMeta, onSafariHandoff?: () => void) {
+  const https = appStoreInstallURL(app)
+  if (isIOSSafariFamily()) {
+    onSafariHandoff?.()
+    window.location.assign(chromeNavigateURL(https))
+    return
+  }
+  window.location.assign(https)
+}
+
+function updatesSeenKey(deviceId: string) {
+  return `portal-updates-seen:${deviceId}`
+}
+
+function requestActivityAt(r: Request): number {
+  const candidates = [r.last_message?.created_at, r.decided_at, r.created_at]
+  let max = 0
+  for (const c of candidates) {
+    if (!c) continue
+    const t = Date.parse(c)
+    if (!Number.isNaN(t) && t > max) max = t
+  }
+  return max
+}
+
 function AppDetailsPanel({
   app,
   loading,
@@ -75,6 +141,7 @@ function AppDetailsPanel({
   app: AppMeta
   loading: boolean
 }) {
+  const { message } = App.useApp()
   const [descOpen, setDescOpen] = useState(false)
   const desc = app.description?.trim() || ''
   const longDesc = desc.length > DESC_PREVIEW
@@ -143,8 +210,16 @@ function AppDetailsPanel({
         </div>
       )}
 
-      {app.store_url && (
-        <Button type="link" href={app.store_url} target="_blank" rel="noreferrer" style={{ paddingInline: 0 }}>
+      {(app.store_url || app.track_id) && (
+        <Button
+          type="link"
+          onClick={() =>
+            openAppStore(app, () => {
+              message.info(he.storeInstallViaChrome)
+            })
+          }
+          style={{ paddingInline: 0 }}
+        >
           {he.appStoreLink}
         </Button>
       )}
@@ -159,7 +234,10 @@ function AppDetailsPanel({
             children: (
               <Space direction="vertical" size={4}>
                 <Typography.Text type="secondary">
-                  {he.bundleId}: <Typography.Text code copyable>{app.bundle_id}</Typography.Text>
+                  {he.bundleId}:{' '}
+                  <Typography.Text code copyable>
+                    {app.bundle_id}
+                  </Typography.Text>
                 </Typography.Text>
                 {app.seller_name && (
                   <Typography.Text type="secondary">
@@ -180,12 +258,74 @@ function AppDetailsPanel({
   )
 }
 
+function StoreAppActions({
+  app,
+  onRequest,
+  onOpenPending,
+}: {
+  app: AppMeta
+  onRequest: () => void
+  onOpenPending: () => void
+}) {
+  const { message } = App.useApp()
+  const status = app.access_status || 'none'
+  if (status === 'allowed') {
+    return (
+      <Button
+        type="primary"
+        size="small"
+        onClick={() =>
+          openAppStore(app, () => {
+            message.info(he.storeInstallViaChrome)
+          })
+        }
+      >
+        {he.storeInstall}
+      </Button>
+    )
+  }
+  if (status === 'pending') {
+    return (
+      <Button size="small" onClick={onOpenPending}>
+        {he.storePending}
+      </Button>
+    )
+  }
+  return (
+    <Button type="primary" size="small" onClick={onRequest}>
+      {he.storeRequestAccess}
+    </Button>
+  )
+}
+
 export default function Portal() {
   const { message } = App.useApp()
   const { deviceId = '' } = useParams()
+  const location = useLocation()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const historyRef = useRef<HTMLDivElement>(null)
+  const isMobile = useIsMobile()
+  const isStoreHome = /\/store\/?$/.test(location.pathname)
 
+  const [modeParam, setModeParam] = useQueryState('tab', parseAsStringLiteral(portalModes))
+  const mode: PortalMode = modeParam ?? (isStoreHome ? 'store' : 'request')
+  // KFilter native shell sets ?client=kfilter — hide external payment UI (ASC 3.1.1).
+  const [clientParam] = useQueryState('client', parseAsString)
+  const companionClient = clientParam === 'kfilter'
+
+  async function setMode(next: PortalMode) {
+    const clientQ = companionClient ? '&client=kfilter' : ''
+    if (isStoreHome && next !== 'store') {
+      navigate(`/d/${encodeURIComponent(deviceId)}?tab=${next}${clientQ}`)
+      return
+    }
+    if (!isStoreHome && next === 'store') {
+      navigate(`/d/${encodeURIComponent(deviceId)}/store${companionClient ? '?client=kfilter' : ''}`)
+      return
+    }
+    await setModeParam(next)
+  }
   const [params, setParams] = useQueryStates({
     cat: parseAsStringLiteral(categories),
     url: parseAsString.withDefault(''),
@@ -194,8 +334,8 @@ export default function Portal() {
     details: parseAsBoolean.withDefault(true),
   })
   const [highlight, setHighlight] = useQueryState('highlight', parseAsString)
+  const [storeQ, setStoreQ] = useQueryState('storeq', parseAsString.withDefault(''))
 
-  // Default category: access-url when ?url= is present (legacy deep-link), else access-app.
   const category: Category = params.cat ?? (params.url ? 'access-url' : 'access-app')
   const url = params.url
   const query = params.q
@@ -211,7 +351,17 @@ export default function Portal() {
   const [iframeUrl, setIframeUrl] = useState('')
   const [pendingPurchaseId, setPendingPurchaseId] = useState('')
   const [checkingOut, setCheckingOut] = useState(false)
+  const [updatesSeenAt, setUpdatesSeenAt] = useState(() => {
+    try {
+      const raw = localStorage.getItem(updatesSeenKey(deviceId))
+      return raw ? Number(raw) || 0 : 0
+    } catch {
+      return 0
+    }
+  })
+
   const debouncedQ = useDebounced(query, 150)
+  const debouncedStoreQ = useDebounced(storeQ, 150)
   const debouncedUrl = useDebounced(url, 350)
 
   const reasonLabel = useMemo(() => {
@@ -235,22 +385,51 @@ export default function Portal() {
     enabled: buyOpen,
   })
   const balance = creditsQuery.data?.available ?? creditsQuery.data?.balance ?? 0
-  const accessCost = creditsQuery.data?.access_cost ?? 1
+  const accessCost = creditsQuery.data?.access_cost ?? 0
+  const creditsEnabled = creditsQuery.data?.enabled !== false && accessCost > 0
+  const hidePurchases = companionClient || !creditsEnabled
+  const hideCreditsUI = !creditsEnabled
   const isAccess = category === 'access-url' || category === 'access-app'
-  const needsCredits = isAccess && balance < accessCost
+  const needsCredits = creditsEnabled && isAccess && balance < accessCost
 
+  // TODO(school-mdm): Real lock-screen push for request updates needs a native app
+  // or Web Push/PWA — Apple MDM profiles cannot show user banners for approve/deny.
+  // Until then, poll while the portal is open and badge the Updates tab.
   const mineQuery = useQuery({
     queryKey: ['my-requests', deviceId],
     queryFn: () => api.myRequests(deviceId),
     enabled: !!deviceId,
-    refetchInterval: 10_000,
+    refetchInterval: mode === 'updates' || mode === 'store' ? 15_000 : 20_000,
   })
   const mine = mineQuery.data ?? []
+
+  const updatesBadge = useMemo(() => {
+    let n = 0
+    for (const r of mine) {
+      if (r.status === 'pending') {
+        n++
+        continue
+      }
+      if (requestActivityAt(r) > updatesSeenAt) n++
+    }
+    return n
+  }, [mine, updatesSeenAt])
+
+  useEffect(() => {
+    if (mode !== 'updates' || !deviceId) return
+    const now = Date.now()
+    setUpdatesSeenAt(now)
+    try {
+      localStorage.setItem(updatesSeenKey(deviceId), String(now))
+    } catch {
+      /* ignore */
+    }
+  }, [mode, deviceId, mineQuery.dataUpdatedAt])
 
   const urlStatusQuery = useQuery({
     queryKey: ['access-status', deviceId, 'url', debouncedUrl],
     queryFn: () => api.accessStatus(deviceId, 'url', debouncedUrl.trim()),
-    enabled: category === 'access-url' && !!debouncedUrl.trim() && !!deviceId,
+    enabled: mode === 'request' && category === 'access-url' && !!debouncedUrl.trim() && !!deviceId,
   })
   const urlStatus = urlStatusQuery.data?.status ?? null
   const checking = urlStatusQuery.isFetching
@@ -258,17 +437,56 @@ export default function Portal() {
   const searchQuery = useQuery({
     queryKey: ['app-search', deviceId, debouncedQ],
     queryFn: () => api.searchApps(debouncedQ.trim(), deviceId),
-    enabled: category === 'access-app' && !bundleId && !!debouncedQ.trim(),
+    enabled:
+      mode === 'request' &&
+      category === 'access-app' &&
+      !bundleId &&
+      debouncedQ.trim().length >= 2,
   })
   const results = searchQuery.data ?? []
   const searching = searchQuery.isFetching
-  const searched = searchQuery.isFetched && !!debouncedQ.trim()
+  const searched = searchQuery.isFetched && debouncedQ.trim().length >= 2
+
+  const storeSearchQuery = useQuery({
+    queryKey: ['store-search', deviceId, debouncedStoreQ],
+    queryFn: () => api.searchApps(debouncedStoreQ.trim(), deviceId),
+    enabled: mode === 'store' && debouncedStoreQ.trim().length >= 2 && !!deviceId,
+  })
+  const storeResults = storeSearchQuery.data ?? []
+  const storeSearching = storeSearchQuery.isFetching
+  const storeSearched = storeSearchQuery.isFetched && debouncedStoreQ.trim().length >= 2
+
+  const allowlistQuery = useQuery({
+    queryKey: ['effective-allowlist', deviceId],
+    queryFn: () => api.effectiveAllowlist(deviceId),
+    enabled: mode === 'store' && !!deviceId,
+  })
+
+  const allowedAppsQuery = useQuery({
+    queryKey: ['store-allowed-apps', deviceId, allowlistQuery.data?.apps],
+    queryFn: async () => {
+      const bundles = (allowlistQuery.data?.apps || []).filter(
+        (b) => b && !b.startsWith('com.apple.'),
+      )
+      const out: AppMeta[] = []
+      for (const bundle of bundles.slice(0, 40)) {
+        try {
+          const meta = await api.lookupApp(bundle, { enrollmentID: deviceId })
+          out.push({ ...meta, access_status: 'allowed' })
+        } catch {
+          /* skip unknown bundles */
+        }
+      }
+      out.sort((a, b) => a.app_name.localeCompare(b.app_name, 'he'))
+      return out
+    },
+    enabled: mode === 'store' && !!deviceId && !!allowlistQuery.data,
+  })
 
   const detailsQuery = useQuery({
     queryKey: ['app-lookup', bundleId, deviceId],
-    queryFn: () =>
-      api.lookupApp(bundleId!, { refresh: true, enrollmentID: deviceId }),
-    enabled: category === 'access-app' && !!bundleId && !!deviceId,
+    queryFn: () => api.lookupApp(bundleId!, { refresh: true, enrollmentID: deviceId }),
+    enabled: mode === 'request' && category === 'access-app' && !!bundleId && !!deviceId,
   })
 
   useEffect(() => {
@@ -286,6 +504,26 @@ export default function Portal() {
     const fromSearch = results.find((r) => r.bundle_id === bundleId)
     return fromSearch ?? { bundle_id: bundleId, app_name: bundleId, developer: '' }
   }, [bundleId, detailsQuery.data, selectedCache, results])
+
+  async function goRequestApp(app: AppMeta) {
+    setSelectedCache(app)
+    const q = new URLSearchParams({
+      tab: 'request',
+      cat: 'access-app',
+      bundle: app.bundle_id,
+      details: 'true',
+    })
+    navigate(`/d/${encodeURIComponent(deviceId)}?${q}`)
+  }
+
+  async function goUpdatesForPending() {
+    await setHighlight(null)
+    if (isStoreHome) {
+      navigate(`/d/${encodeURIComponent(deviceId)}?tab=updates`)
+      return
+    }
+    await setModeParam('updates')
+  }
 
   async function submit() {
     if (needsCredits) {
@@ -313,6 +551,7 @@ export default function Portal() {
       setSelectedCache(null)
       await setParams({ bundle: null, q: '', details: true })
       await setHighlight(created.id)
+      await setMode('updates')
       await qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
       await qc.invalidateQueries({ queryKey: ['credits', deviceId] })
       requestAnimationFrame(() => historyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -342,15 +581,32 @@ export default function Portal() {
 
   async function finishPayment() {
     if (!pendingPurchaseId) return
+    const purchaseId = pendingPurchaseId
+    const hide = message.loading(he.paymentConfirming, 0)
+    // Webhook may lag the iframe TransactionResponse — poll confirm briefly.
+    const deadline = Date.now() + 45_000
+    let lastErr: string = he.paymentPending
     try {
-      await api.creditConfirm(deviceId, pendingPurchaseId)
-      message.success(he.paymentSuccess)
-      setPayOpen(false)
-      setIframeUrl('')
-      setPendingPurchaseId('')
-      await qc.invalidateQueries({ queryKey: ['credits', deviceId] })
-    } catch (err) {
-      message.error((err as Error).message || he.paymentPending)
+      while (Date.now() < deadline) {
+        try {
+          await api.creditConfirm(deviceId, purchaseId)
+          hide()
+          message.success(he.paymentSuccess)
+          setPayOpen(false)
+          setIframeUrl('')
+          setPendingPurchaseId('')
+          await qc.invalidateQueries({ queryKey: ['credits', deviceId] })
+          return
+        } catch (err) {
+          lastErr = (err as Error).message || he.paymentPending
+          await new Promise((r) => setTimeout(r, 1200))
+        }
+      }
+      hide()
+      message.warning(lastErr)
+    } catch {
+      hide()
+      message.error(lastErr)
     }
   }
 
@@ -382,17 +638,46 @@ export default function Portal() {
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-    // finishPayment closes over pendingPurchaseId / deviceId
   }, [pendingPurchaseId, deviceId, message])
 
   const blocked =
     (category === 'access-url' && urlStatus === 'allowed') ||
     (category === 'access-app' && selected?.access_status === 'allowed')
 
-  const isMobile = useIsMobile()
-
   function fmtILS(agorot: number) {
     return he.priceILS.replace('{n}', (agorot / 100).toFixed(agorot % 100 === 0 ? 0 : 2))
+  }
+
+  function renderStoreApp(item: AppMeta) {
+    return (
+      <List.Item
+        key={item.bundle_id}
+        className="store-app-row"
+        actions={[
+          <StoreAppActions
+            key="act"
+            app={item}
+            onRequest={() => void goRequestApp(item)}
+            onOpenPending={() => void goUpdatesForPending()}
+          />,
+        ]}
+      >
+        <List.Item.Meta
+          avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
+          title={item.app_name}
+          description={
+            <Space direction="vertical" size={2}>
+              {item.developer ? (
+                <Typography.Text type="secondary">
+                  {he.by} {item.developer}
+                </Typography.Text>
+              ) : null}
+              {statusTag(item.access_status)}
+            </Space>
+          }
+        />
+      </List.Item>
+    )
   }
 
   return (
@@ -400,305 +685,404 @@ export default function Portal() {
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <div>
           <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
-            {he.portalTitle}
+            {isStoreHome ? he.portalStoreTitle : he.portalTitle}
           </Typography.Title>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-            {he.portalLead}
+            {isStoreHome ? he.portalStoreLead : he.portalLead}
           </Typography.Paragraph>
-          <Flex gap={8} wrap="wrap" align="center">
-            <Tag style={{ maxWidth: '100%', whiteSpace: 'normal', height: 'auto' }}>
-              {he.device}{' '}
-              <Typography.Text code style={{ wordBreak: 'break-all' }}>
-                {deviceId}
-              </Typography.Text>
-            </Tag>
-            <Tag color={balance > 0 ? 'success' : 'default'}>
-              {he.availableBalance}: {creditsQuery.isLoading ? '…' : balance}
-            </Tag>
-            <Button size="small" onClick={() => setBuyOpen(true)}>
-              {he.buyCredits}
-            </Button>
-          </Flex>
+          {!hideCreditsUI ? (
+            <Flex gap={8} wrap="wrap" align="center">
+              <Tag color={balance > 0 ? 'success' : 'default'}>
+                {he.availableBalance}: {creditsQuery.isLoading ? '…' : balance}
+              </Tag>
+              {!hidePurchases ? (
+                <Button size="small" onClick={() => setBuyOpen(true)}>
+                  {he.buyCredits}
+                </Button>
+              ) : null}
+            </Flex>
+          ) : null}
         </div>
 
-        {needsCredits && (
+        <Segmented
+          block
+          size={isMobile ? 'small' : 'middle'}
+          value={mode}
+          onChange={(v) => void setMode(v as PortalMode)}
+          options={[
+            { value: 'store', label: he.portalTabStore },
+            { value: 'request', label: he.portalTabRequest },
+            {
+              value: 'updates',
+              label: (
+                <Badge count={updatesBadge} size="small" offset={[8, -2]}>
+                  <span>{he.portalTabUpdates}</span>
+                </Badge>
+              ),
+            },
+          ]}
+        />
+
+        {needsCredits && mode === 'request' && (
           <Alert
             type="warning"
             showIcon
             message={he.insufficientCredits}
-            description={he.insufficientCreditsHint}
+            description={hidePurchases ? he.companionCreditsHint : he.insufficientCreditsHint}
             action={
-              <Button size="small" type="primary" onClick={() => setBuyOpen(true)}>
-                {he.buyCredits}
-              </Button>
+              hidePurchases ? undefined : (
+                <Button size="small" type="primary" onClick={() => setBuyOpen(true)}>
+                  {he.buyCredits}
+                </Button>
+              )
             }
           />
         )}
 
-        <Card>
+        {mode === 'store' && (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <div>
-              <Typography.Text type="secondary">{he.category}</Typography.Text>
-              <div style={{ marginTop: 8 }}>
-                <Segmented
-                  block
-                  size={isMobile ? 'small' : 'middle'}
-                  value={category}
-                  onChange={(v) => {
-                    const next = v as Category
-                    void setParams({
-                      cat: next,
-                      bundle: null,
-                      q: '',
-                      details: true,
-                      ...(next !== 'access-url' ? { url: '' } : {}),
-                    })
-                    setSelectedCache(null)
-                  }}
-                  options={[
-                    { value: 'access-url', label: he.catUrl },
-                    { value: 'access-app', label: he.catApp },
-                    { value: 'general', label: he.catGeneral },
-                    { value: 'bug', label: he.catBug },
-                  ]}
-                />
-              </div>
-              {isAccess && (
-                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                  {he.accessCostsCredits.replace('{n}', String(accessCost))}
-                </Typography.Text>
-              )}
-            </div>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              {he.storeLead}
+            </Typography.Paragraph>
 
-            {category === 'access-url' && (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text type="secondary">{he.url}</Typography.Text>
-                <Input
-                  value={url}
-                  onChange={(e) => void setParams({ url: e.target.value })}
-                  placeholder="https://"
-                />
-                {urlPreview && (
-                  <Typography.Text type="secondary">
-                    {he.urlWillSave}: <Typography.Text code>{urlPreview}</Typography.Text>
-                  </Typography.Text>
-                )}
-                {checking && <Typography.Text type="secondary">{he.checkStatus}</Typography.Text>}
-                {statusTag(urlStatus || undefined)}
-                {urlStatus === 'allowed' && (
-                  <Alert type="success" showIcon message={he.alreadyAllowedHint} />
-                )}
-              </Space>
-            )}
-
-            {category === 'access-app' && !bundleId && (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text type="secondary">{he.searchApp}</Typography.Text>
-                <Input
-                  value={query}
-                  onChange={(e) => void setParams({ q: e.target.value })}
-                  placeholder="YouTube"
-                  autoComplete="off"
-                  allowClear
-                />
-                {searching && (
-                  <Flex gap={8} align="center">
-                    <Spin size="small" />
-                    <Typography.Text type="secondary">{he.searching}</Typography.Text>
-                  </Flex>
-                )}
-                {searched && !searching && results.length === 0 && (
-                  <Empty description={he.noApps} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                )}
+            <Card size="small" title={he.storeAllowed}>
+              {allowlistQuery.isLoading || allowedAppsQuery.isLoading ? (
+                <Skeleton active paragraph={{ rows: 2 }} />
+              ) : (allowedAppsQuery.data ?? []).length ? (
                 <List
-                  dataSource={results}
-                  loading={searching && !results.length}
-                  renderItem={(item) => (
-                    <List.Item
-                      className="tap-row"
-                      onClick={() => {
-                        setSelectedCache(item)
-                        void setParams({ bundle: item.bundle_id, details: true })
-                      }}
-                      actions={
-                        isMobile
-                          ? undefined
-                          : [
-                              <Button key="pick" type="link">
-                                {he.pick}
-                              </Button>,
-                            ]
-                      }
-                    >
-                      <List.Item.Meta
-                        avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
-                        title={item.app_name}
-                        description={
-                          <Space direction="vertical" size={4}>
-                            {item.developer ? `${he.by} ${item.developer}` : null}
-                            {item.access_status && item.access_status !== 'none'
-                              ? statusTag(item.access_status)
-                              : null}
-                            {isMobile && (
-                              <Typography.Text type="secondary">{he.pick}</Typography.Text>
-                            )}
-                          </Space>
-                        }
-                      />
-                    </List.Item>
-                  )}
+                  className="store-app-list"
+                  dataSource={allowedAppsQuery.data}
+                  renderItem={renderStoreApp}
                 />
-              </Space>
-            )}
+              ) : (
+                <Empty description={he.storeEmptyAllowed} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
+            </Card>
 
-            {category === 'access-app' && selected && bundleId && (
-              <div className="app-selected">
-                <Flex gap={12} align="start" justify="space-between" wrap="wrap">
-                  <Flex gap={12} align="center">
-                    <AppThumb name={selected.app_name} url={selected.artwork_url} size={56} />
-                    <div>
-                      <Typography.Text strong>{selected.app_name}</Typography.Text>
-                      <div>
-                        <Typography.Text type="secondary">
-                          {selected.developer ? `${he.by} ${selected.developer}` : ''}
-                        </Typography.Text>
-                      </div>
-                      {statusTag(selected.access_status)}
-                    </div>
-                  </Flex>
-                  <Space>
-                    <Button
-                      type="link"
-                      onClick={() => void setParams({ details: !detailsOpen })}
-                      style={{ paddingInline: 0 }}
-                    >
-                      {detailsOpen ? he.hideDetails : he.showDetails}
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setSelectedCache(null)
-                        void setParams({ bundle: null, details: true })
-                      }}
-                    >
-                      {he.change}
-                    </Button>
-                  </Space>
+            <Card size="small" title={he.storeSearch}>
+              <Input
+                value={storeQ}
+                onChange={(e) => void setStoreQ(e.target.value)}
+                placeholder="YouTube"
+                allowClear
+                autoComplete="off"
+                style={{ marginBottom: 12 }}
+              />
+              {storeQ.trim() && storeQ.trim().length < 2 ? (
+                <Typography.Text type="secondary">{he.searchMinChars}</Typography.Text>
+              ) : null}
+              {storeSearching && (
+                <Flex gap={8} align="center" style={{ marginBottom: 8 }}>
+                  <Spin size="small" />
+                  <Typography.Text type="secondary">{he.searching}</Typography.Text>
                 </Flex>
-                {selected.access_status === 'allowed' && (
-                  <Alert
-                    style={{ marginTop: 12 }}
-                    type="success"
-                    showIcon
-                    message={he.alreadyAllowedHint}
-                  />
-                )}
-                {detailsOpen && (
-                  <Spin spinning={detailsQuery.isFetching && !detailsQuery.data}>
-                    <AppDetailsPanel
-                      app={selected}
-                      loading={detailsQuery.isFetching}
-                    />
-                  </Spin>
-                )}
-              </div>
-            )}
-
-            {(category === 'general' || category === 'bug') && (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text type="secondary">
-                  {category === 'bug' ? he.bugTitle : he.subject}
-                </Typography.Text>
-                <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
-              </Space>
-            )}
-
-            {!blocked && (
-              <Space direction="vertical" style={{ width: '100%' }}>
-                <Typography.Text type="secondary">{reasonLabel}</Typography.Text>
-                <Input.TextArea
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  rows={3}
-                />
-                <Button type="primary" block loading={submitting} onClick={submit}>
-                  {he.submit}
-                </Button>
-              </Space>
-            )}
+              )}
+              {storeSearchQuery.isError ? (
+                <Alert type="error" showIcon message={he.searchFailed} />
+              ) : null}
+              {storeSearched && !storeSearching && !storeSearchQuery.isError && !storeResults.length && (
+                <Empty description={he.noApps} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
+              <List
+                className="store-app-list"
+                dataSource={storeResults}
+                loading={storeSearching && !storeResults.length}
+                renderItem={renderStoreApp}
+              />
+            </Card>
           </Space>
-        </Card>
+        )}
 
-        <div ref={historyRef}>
-          <Typography.Title level={4}>{he.myRequests}</Typography.Title>
-          {mineQuery.isLoading && !mine.length && (
-            <Skeleton active paragraph={{ rows: 3 }} />
-          )}
-          {!mineQuery.isLoading && !mine.length && <Empty description={he.noRequests} />}
-          <Spin spinning={mineQuery.isFetching && !!mine.length}>
+        {mode === 'request' && (
+          <Card>
             <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-              {mine.map((r) => {
-                const next = studentNextAction(r.type, r.status, r.last_message?.author_role)
-                return (
-                  <Card
-                    key={r.id}
-                    className="request-card"
-                    size="small"
-                    style={
-                      highlight === r.id
-                        ? { outline: '2px solid #0b6e4f', outlineOffset: 2 }
-                        : undefined
-                    }
-                    title={
-                      <Flex gap={10} align="center" className="card-title-wrap">
-                        {r.type === 'access' && r.kind === 'app' && (
-                          <AppThumb name={r.app?.app_name || r.value} url={r.app?.artwork_url} size={32} />
-                        )}
-                        <span>{r.app?.app_name || r.value}</span>
-                      </Flex>
-                    }
-                    extra={
-                      <Tag color={nextTagColor(next.kind, r.status)}>{next.label}</Tag>
-                    }
-                  >
+              <div>
+                <Typography.Text type="secondary">{he.category}</Typography.Text>
+                <div style={{ marginTop: 8 }}>
+                  <Segmented
+                    block
+                    size={isMobile ? 'small' : 'middle'}
+                    value={category}
+                    onChange={(v) => {
+                      const next = v as Category
+                      void setParams({
+                        cat: next,
+                        bundle: null,
+                        q: '',
+                        details: true,
+                        ...(next !== 'access-url' ? { url: '' } : {}),
+                      })
+                      setSelectedCache(null)
+                    }}
+                    options={[
+                      { value: 'access-url', label: he.catUrl },
+                      { value: 'access-app', label: he.catApp },
+                      { value: 'general', label: he.catGeneral },
+                      { value: 'bug', label: he.catBug },
+                    ]}
+                  />
+                </div>
+                {isAccess && creditsEnabled ? (
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                    {he.accessCostsCredits.replace('{n}', String(accessCost))}
+                  </Typography.Text>
+                ) : null}
+              </div>
+
+              {category === 'access-url' && (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Typography.Text type="secondary">{he.url}</Typography.Text>
+                  <Input
+                    value={url}
+                    onChange={(e) => void setParams({ url: e.target.value })}
+                    placeholder="https://"
+                  />
+                  {urlPreview && (
                     <Typography.Text type="secondary">
-                      {fmtTime(r.created_at)} · {he.typeLabel[r.type] || r.type}
+                      {he.urlWillSave}: <Typography.Text code>{urlPreview}</Typography.Text>
                     </Typography.Text>
-                    <RequestThread
-                      requestId={r.id}
-                      role="student"
-                      deviceId={deviceId}
-                      closed={r.status !== 'pending'}
-                      onPosted={() => {
-                        void qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
-                      }}
+                  )}
+                  {checking && <Typography.Text type="secondary">{he.checkStatus}</Typography.Text>}
+                  {statusTag(urlStatus || undefined)}
+                  {urlStatus === 'allowed' && (
+                    <Alert type="success" showIcon message={he.alreadyAllowedHint} />
+                  )}
+                </Space>
+              )}
+
+              {category === 'access-app' && !bundleId && (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Typography.Text type="secondary">{he.searchApp}</Typography.Text>
+                  <Input
+                    value={query}
+                    onChange={(e) => void setParams({ q: e.target.value })}
+                    placeholder="YouTube"
+                    autoComplete="off"
+                    allowClear
+                  />
+                  {query.trim() && query.trim().length < 2 ? (
+                    <Typography.Text type="secondary">{he.searchMinChars}</Typography.Text>
+                  ) : null}
+                  {searching && (
+                    <Flex gap={8} align="center">
+                      <Spin size="small" />
+                      <Typography.Text type="secondary">{he.searching}</Typography.Text>
+                    </Flex>
+                  )}
+                  {searchQuery.isError ? (
+                    <Alert type="error" showIcon message={he.searchFailed} />
+                  ) : null}
+                  {searched && !searching && !searchQuery.isError && results.length === 0 && (
+                    <Empty description={he.noApps} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  )}
+                  <List
+                    dataSource={results}
+                    loading={searching && !results.length}
+                    renderItem={(item) => (
+                      <List.Item
+                        className="tap-row"
+                        onClick={() => {
+                          setSelectedCache(item)
+                          void setParams({ bundle: item.bundle_id, details: true })
+                        }}
+                        actions={
+                          isMobile
+                            ? undefined
+                            : [
+                                <Button key="pick" type="link">
+                                  {he.pick}
+                                </Button>,
+                              ]
+                        }
+                      >
+                        <List.Item.Meta
+                          avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
+                          title={item.app_name}
+                          description={
+                            <Space direction="vertical" size={4}>
+                              {item.developer ? `${he.by} ${item.developer}` : null}
+                              {item.access_status && item.access_status !== 'none'
+                                ? statusTag(item.access_status)
+                                : null}
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    )}
+                  />
+                </Space>
+              )}
+
+              {category === 'access-app' && selected && bundleId && (
+                <div className="app-selected">
+                  <Flex gap={12} align="start" justify="space-between" wrap="wrap">
+                    <Flex gap={12} align="center">
+                      <AppThumb name={selected.app_name} url={selected.artwork_url} size={56} />
+                      <div>
+                        <Typography.Text strong>{selected.app_name}</Typography.Text>
+                        <div>
+                          <Typography.Text type="secondary">
+                            {selected.developer ? `${he.by} ${selected.developer}` : ''}
+                          </Typography.Text>
+                        </div>
+                        {statusTag(selected.access_status)}
+                      </div>
+                    </Flex>
+                    <Space>
+                      {selected.access_status === 'allowed' ? (
+                        <Button
+                          type="primary"
+                          onClick={() =>
+                            openAppStore(selected, () => {
+                              message.info(he.storeInstallViaChrome)
+                            })
+                          }
+                        >
+                          {he.storeInstall}
+                        </Button>
+                      ) : null}
+                      <Button
+                        onClick={() => {
+                          setSelectedCache(null)
+                          void setParams({ bundle: null, details: true })
+                        }}
+                      >
+                        {he.change}
+                      </Button>
+                    </Space>
+                  </Flex>
+                  {selected.access_status === 'allowed' && (
+                    <Alert
+                      style={{ marginTop: 12 }}
+                      type="success"
+                      showIcon
+                      message={he.alreadyAllowedHint}
                     />
-                  </Card>
-                )
-              })}
+                  )}
+                  {detailsOpen && (
+                    <Spin spinning={detailsQuery.isFetching && !detailsQuery.data}>
+                      <AppDetailsPanel app={selected} loading={detailsQuery.isFetching} />
+                    </Spin>
+                  )}
+                </div>
+              )}
+
+              {(category === 'general' || category === 'bug') && (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Typography.Text type="secondary">
+                    {category === 'bug' ? he.bugTitle : he.subject}
+                  </Typography.Text>
+                  <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
+                </Space>
+              )}
+
+              {!blocked && (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Typography.Text type="secondary">{reasonLabel}</Typography.Text>
+                  <Input.TextArea
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    rows={3}
+                  />
+                  <Button type="primary" block loading={submitting} onClick={() => void submit()}>
+                    {he.submit}
+                  </Button>
+                </Space>
+              )}
             </Space>
-          </Spin>
-        </div>
+          </Card>
+        )}
+
+        {mode === 'updates' && (
+          <div ref={historyRef}>
+            <Typography.Paragraph type="secondary">{he.updatesLead}</Typography.Paragraph>
+            {mineQuery.isLoading && !mine.length && <Skeleton active paragraph={{ rows: 3 }} />}
+            {!mineQuery.isLoading && !mine.length && <Empty description={he.noRequests} />}
+            <Spin spinning={mineQuery.isFetching && !!mine.length}>
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                {mine.map((r) => {
+                  const next = studentNextAction(r.type, r.status, r.last_message?.author_role)
+                  const isNew = requestActivityAt(r) > updatesSeenAt - 1 && r.status !== 'pending'
+                  return (
+                    <Card
+                      key={r.id}
+                      className="request-card"
+                      size="small"
+                      style={
+                        highlight === r.id
+                          ? { outline: '2px solid #0b6e4f', outlineOffset: 2 }
+                          : undefined
+                      }
+                      title={
+                        <Flex gap={10} align="center" className="card-title-wrap">
+                          {r.type === 'access' && r.kind === 'app' && (
+                            <AppThumb
+                              name={r.app?.app_name || r.value}
+                              url={r.app?.artwork_url}
+                              size={32}
+                            />
+                          )}
+                          <span>{r.app?.app_name || r.value}</span>
+                          {isNew ? <Tag color="blue">{he.updatesBadgeNew}</Tag> : null}
+                        </Flex>
+                      }
+                      extra={<Tag color={nextTagColor(next.kind, r.status)}>{next.label}</Tag>}
+                    >
+                      <Typography.Text type="secondary">
+                        {fmtTime(r.created_at)} · {he.typeLabel[r.type] || r.type}
+                      </Typography.Text>
+                      {r.last_message?.body ? (
+                        <div className="inbox-snip">{r.last_message.body}</div>
+                      ) : null}
+                      <RequestThread
+                        requestId={r.id}
+                        role="student"
+                        deviceId={deviceId}
+                        closed={r.status !== 'pending'}
+                        onPosted={() => {
+                          void qc.invalidateQueries({ queryKey: ['my-requests', deviceId] })
+                        }}
+                      />
+                    </Card>
+                  )
+                })}
+              </Space>
+            </Spin>
+          </div>
+        )}
       </Space>
 
       <Modal
         title={he.buyCreditsTitle}
-        open={buyOpen}
+        open={buyOpen && !hidePurchases}
         onCancel={() => setBuyOpen(false)}
         footer={null}
         destroyOnHidden
+        width={isMobile ? '100%' : 520}
+        centered={!isMobile}
       >
         <Typography.Paragraph type="secondary">{he.choosePackage}</Typography.Paragraph>
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
           {(packagesQuery.data ?? []).map((pkg) => (
             <Card key={pkg.id} size="small">
-              <Flex justify="space-between" align="center" gap={12}>
+              <Flex
+                justify="space-between"
+                align={isMobile ? 'stretch' : 'center'}
+                gap={12}
+                vertical={isMobile}
+              >
                 <div>
                   <Typography.Text strong>{pkg.name_he}</Typography.Text>
                   <div>
                     <Typography.Text type="secondary">{fmtILS(pkg.price_agorot)}</Typography.Text>
                   </div>
                 </div>
-                <Button type="primary" loading={checkingOut} onClick={() => void startCheckout(pkg)}>
+                <Button
+                  type="primary"
+                  block={isMobile}
+                  loading={checkingOut}
+                  onClick={() => void startCheckout(pkg)}
+                >
                   {he.payNow}
                 </Button>
               </Flex>
@@ -712,18 +1096,24 @@ export default function Portal() {
       </Modal>
 
       <Modal
-        title={he.fakeNedarim}
-        open={payOpen}
+        title={he.nedarimPay}
+        open={payOpen && !hidePurchases}
         onCancel={() => setPayOpen(false)}
         footer={null}
-        width={480}
+        width={isMobile ? '100%' : 480}
+        centered={!isMobile}
         destroyOnHidden
       >
         {iframeUrl ? (
           <iframe
             title="nedarim"
             src={iframeUrl}
-            style={{ width: '100%', minHeight: 420, border: '1px solid #d7e5dd', borderRadius: 8 }}
+            style={{
+              width: '100%',
+              minHeight: isMobile ? 'min(60vh, 420px)' : 420,
+              border: '1px solid #d7e5dd',
+              borderRadius: 8,
+            }}
           />
         ) : (
           <Spin />

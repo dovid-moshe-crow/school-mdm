@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/credits"
 	"github.com/dwdmsh/school-mdm/internal/nedarim"
 	"github.com/dwdmsh/school-mdm/internal/store"
@@ -36,6 +36,7 @@ func (a *API) handleCreditBalance(w http.ResponseWriter, r *http.Request) {
 		"allotment_balance":  bal.AllotmentBalance,
 		"available":          bal.Available(),
 		"access_cost":        a.Credits.AccessRequestCost(r.Context()),
+		"enabled":            a.Credits.CreditsEnabled(r.Context()),
 		"updated_at":         bal.UpdatedAt,
 	})
 }
@@ -82,6 +83,10 @@ func (a *API) handleCreditCheckout(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "credits unavailable"})
 		return
 	}
+	if !a.Credits.CreditsEnabled(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "credit purchases disabled"})
+		return
+	}
 	var body checkoutBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -93,9 +98,34 @@ func (a *API) handleCreditCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := a.Credits.StartCheckout(r.Context(), enrollment, body.PackageID)
 	if err != nil {
+		a.audit(r, activity.Event{
+			Category:     store.ActivityCategoryCredits,
+			Action:       "checkout_start",
+			ActorType:    store.ActivityActorDevice,
+			Actor:        enrollment,
+			EnrollmentID: enrollment,
+			Result:       store.ActivityResultError,
+			Summary:      "התחלת רכישת קרדיטים נכשלה",
+			Detail:       map[string]any{"package_id": body.PackageID, "error": err.Error()},
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryCredits,
+		Action:       "checkout_start",
+		ActorType:    store.ActivityActorDevice,
+		Actor:        enrollment,
+		EnrollmentID: enrollment,
+		Result:       store.ActivityResultOK,
+		Summary:      "התחילה רכישת קרדיטים",
+		Detail: map[string]any{
+			"purchase_id":   result.Purchase.ID,
+			"credits":       result.Purchase.Credits,
+			"amount_agorot": result.Purchase.AmountAgorot,
+			"mode":          result.Mode,
+		},
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"purchase_id":   result.Purchase.ID,
 		"iframe_url":    result.IframeURL,
@@ -209,6 +239,8 @@ func (a *API) handleNedarimBridge(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = fmt.Fprintf(w, nedarimBridgeHTML,
+		html.EscapeString(fmt.Sprintf("%.2f", float64(p.AmountAgorot)/100.0)),
+		p.Credits,
 		html.EscapeString(nedarim.IframeEmbedURL()),
 		html.EscapeString(params["Mosad"]),
 		html.EscapeString(params["ApiValid"]),
@@ -216,6 +248,7 @@ func (a *API) handleNedarimBridge(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(params["Param2"]),
 		html.EscapeString(params["CallBack"]),
 		html.EscapeString(params["Comment"]),
+		html.EscapeString(params["TransactionId"]),
 		html.EscapeString(p.ID),
 	)
 }
@@ -235,9 +268,49 @@ func (a *API) handleNedarimWebhook(w http.ResponseWriter, r *http.Request) {
 		if a.Log != nil {
 			a.Log.Warn("nedarim webhook", "err", err)
 		}
+		a.audit(r, activity.Event{
+			Category:     store.ActivityCategoryCredits,
+			Action:       "nedarim_webhook",
+			ActorType:    store.ActivityActorWebhook,
+			Actor:        "nedarim",
+			EnrollmentID: "",
+			Result:       store.ActivityResultError,
+			Summary:      "Webhook נדרים נכשל",
+			Detail:       map[string]any{"client_unique_id": payload.ClientUniqueID, "error": err.Error()},
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	action := "nedarim_paid"
+	summary := "תשלום נדרים התקבל — קרדיטים נוספו"
+	result := store.ActivityResultOK
+	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	if status == "error" || status == "fail" || status == "failed" || status == "refusal" || status == "refused" {
+		action = "nedarim_refused"
+		summary = "תשלום נדרים נדחה / נכשל"
+		result = store.ActivityResultInfo
+	} else if p.Status != store.PurchasePaid {
+		action = "nedarim_webhook"
+		summary = "Webhook נדרים התקבל ללא חיוב"
+		result = store.ActivityResultInfo
+	}
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryCredits,
+		Action:       action,
+		ActorType:    store.ActivityActorWebhook,
+		Actor:        "nedarim",
+		EnrollmentID: p.EnrollmentID,
+		Result:       result,
+		Summary:      summary,
+		Detail: map[string]any{
+			"purchase_id":       p.ID,
+			"credits":           p.Credits,
+			"client_unique_id":  payload.ClientUniqueID,
+			"transaction_id":    payload.TransactionID,
+			"status":            payload.Status,
+			"purchase_status":   p.Status,
+		},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "purchase_id": p.ID})
 }
 
@@ -277,8 +350,8 @@ func parseNedarimWebhook(r *http.Request) (credits.WebhookPayload, error) {
 		return ""
 	}
 
-	payload.ClientUniqueID = get("ClientUniqueId", "clientUniqueId", "Param2", "param2", "CallbackParam")
-	payload.TransactionID = get("TransactionId", "transactionId", "Id", "id")
+	payload.ClientUniqueID = get("ClientUniqueId", "clientUniqueId", "Param2", "param2", "CallbackParam", "ClientUniqueID")
+	payload.TransactionID = get("TransactionId", "transactionId", "Id", "id", "ID")
 	payload.Amount = get("Amount", "amount")
 	payload.Status = get("Status", "status", "Result", "result")
 	if payload.ClientUniqueID == "" {
@@ -304,10 +377,23 @@ func (a *API) handleAdminGiftCredits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := a.Credits.Gift(r.Context(), body.EnrollmentID, body.Amount, body.Note)
+	actorType, actor := a.adminActor(r)
 	if err != nil {
+		a.audit(r, activity.Event{
+			Category: store.ActivityCategoryCredits, Action: "credit_gift",
+			ActorType: actorType, Actor: actor, EnrollmentID: body.EnrollmentID,
+			Result: store.ActivityResultError, Summary: "הענקת קרדיטים נכשלה",
+			Detail: map[string]any{"amount": body.Amount, "error": err.Error()},
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.audit(r, activity.Event{
+		Category: store.ActivityCategoryCredits, Action: "credit_gift",
+		ActorType: actorType, Actor: actor, EnrollmentID: body.EnrollmentID,
+		Result: store.ActivityResultOK, Summary: "הוענקו קרדיטים למכשיר",
+		Detail: map[string]any{"amount": body.Amount, "note": body.Note, "balance": res.Balance},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enrollment_id":      body.EnrollmentID,
 		"balance":            res.Balance,
@@ -335,14 +421,23 @@ func (a *API) handleAdminAdjustCredits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := a.Credits.Adjust(r.Context(), body.EnrollmentID, body.Amount, body.Note)
+	actorType, actor := a.adminActor(r)
 	if err != nil {
-		if errors.Is(err, store.ErrInsufficientCredits) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
+		a.audit(r, activity.Event{
+			Category: store.ActivityCategoryCredits, Action: "credit_adjust",
+			ActorType: actorType, Actor: actor, EnrollmentID: body.EnrollmentID,
+			Result: store.ActivityResultError, Summary: "התאמת קרדיטים נכשלה",
+			Detail: map[string]any{"amount": body.Amount, "error": err.Error()},
+		})
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.audit(r, activity.Event{
+		Category: store.ActivityCategoryCredits, Action: "credit_adjust",
+		ActorType: actorType, Actor: actor, EnrollmentID: body.EnrollmentID,
+		Result: store.ActivityResultOK, Summary: "התאמת קרדיטים במכשיר",
+		Detail: map[string]any{"amount": body.Amount, "note": body.Note, "balance": res.Balance},
+	})
 	ledger, _ := a.Credits.Ledger(r.Context(), body.EnrollmentID, 20)
 	if ledger == nil {
 		ledger = []store.CreditLedgerEntry{}
@@ -402,6 +497,46 @@ func (a *API) handleAdminListCredits(w http.ResponseWriter, r *http.Request) {
 		list = []store.DeviceCredits{}
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (a *API) handleAdminListPurchases(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := store.CreditPurchaseFilter{
+		EnrollmentID: strings.TrimSpace(q.Get("enrollment_id")),
+		Status:       strings.TrimSpace(q.Get("status")),
+	}
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		f.Limit, _ = strconv.Atoi(v)
+	}
+	if v := strings.TrimSpace(q.Get("offset")); v != "" {
+		f.Offset, _ = strconv.Atoi(v)
+	}
+	purchases, err := a.Store.ListCreditPurchases(r.Context(), f)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	type row struct {
+		store.CreditPurchase
+		DeviceName  string `json:"device_name,omitempty"`
+		PackageName string `json:"package_name,omitempty"`
+	}
+	out := make([]row, 0, len(purchases))
+	for _, p := range purchases {
+		item := row{CreditPurchase: p}
+		if d, err := a.Store.GetDevice(r.Context(), p.EnrollmentID); err == nil {
+			item.DeviceName = d.Name
+		}
+		if pkg, err := a.Store.GetCreditPackage(r.Context(), p.PackageID); err == nil {
+			item.PackageName = pkg.NameHe
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"purchases": out,
+		"limit":     f.Limit,
+		"offset":    f.Offset,
+	})
 }
 
 func (a *API) handleAdminCreditLedger(w http.ResponseWriter, r *http.Request) {
@@ -815,14 +950,35 @@ const nedarimBridgeHTML = `<!DOCTYPE html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>נדרים פלוס</title>
-<style>body{margin:0;font-family:Assistant,Arial,sans-serif}iframe{border:0;width:100%%;min-height:480px}</style>
+<style>
+body{margin:0;padding:12px;font-family:Assistant,Arial,sans-serif;background:#f7faf8;color:#123}
+.meta{display:flex;justify-content:space-between;gap:12px;margin:0 0 10px;font-size:.95rem}
+iframe{border:1px solid #d7e5dd;border-radius:8px;width:100%%;min-height:280px;background:#fff}
+.btns{display:flex;gap:8px;margin-top:12px}
+button{flex:1;padding:12px;border:0;border-radius:8px;font:inherit;cursor:pointer}
+.pay{background:#0b6e4f;color:#fff}
+.cancel{background:#eef2f0;color:#234}
+.err{color:#b00020;margin-top:8px;font-size:.9rem;min-height:1.2em}
+.wait{display:none;text-align:center;color:#567;margin-top:8px;font-size:.9rem}
+</style>
 </head>
 <body>
+<div class="meta"><span>סכום לתשלום</span><strong>₪%s · %d קרדיטים</strong></div>
 <iframe id="NedarimFrame" src="%s"></iframe>
+<div class="btns">
+  <button class="pay" id="pay" type="button">ביצוע תשלום</button>
+  <button class="cancel" id="cancel" type="button">ביטול</button>
+</div>
+<div class="wait" id="wait">מבצע חיוב, נא להמתין…</div>
+<div class="err" id="err"></div>
 <script>
-const mosad=%q, apiValid=%q, amount=%q, param2=%q, callback=%q, comment=%q, purchaseId=%q;
+const mosad=%q, apiValid=%q, amount=%q, param2=%q, callback=%q, comment=%q, transactionId=%q, purchaseId=%q;
 function PostNedarim(Data){
   document.getElementById('NedarimFrame').contentWindow.postMessage(Data, '*');
+}
+function setBusy(busy){
+  document.getElementById('pay').disabled = busy;
+  document.getElementById('wait').style.display = busy ? 'block' : 'none';
 }
 window.addEventListener('message', function(event){
   if (!event.data) return;
@@ -830,23 +986,48 @@ window.addEventListener('message', function(event){
     document.getElementById('NedarimFrame').style.height = (parseInt(event.data.Value,10)+15)+'px';
   }
   if (event.data.Name === 'TransactionResponse') {
+    setBusy(false);
+    const value = event.data.Value || {};
+    if (value.BackMessage === 'NEED CAPTCHA' || value.BackMessage === 'CAPTCHA ERROR') {
+      document.getElementById('err').textContent = 'יש לאמת CAPTCHA ואז ללחוץ שוב על ביצוע תשלום';
+      return;
+    }
+    const failed = value.Status === 'Error';
+    if (failed) {
+      document.getElementById('err').textContent = value.Message || 'התשלום נכשל';
+    }
     window.parent.postMessage({
-      type: event.data.Value && event.data.Value.Status === 'Error' ? 'nedarim-error' : 'nedarim-success',
+      type: failed ? 'nedarim-error' : 'nedarim-success',
       Name: 'TransactionResponse',
-      Value: Object.assign({}, event.data.Value||{}, { purchase_id: purchaseId, ClientUniqueId: param2 })
+      Value: Object.assign({}, value, { purchase_id: purchaseId, ClientUniqueId: param2 }),
+      error: failed ? (value.Message || 'התשלום נכשל') : undefined
     }, '*');
   }
 });
 document.getElementById('NedarimFrame').onload = function(){
   PostNedarim({Name:'GetHeight'});
+};
+document.getElementById('pay').onclick = function(){
+  document.getElementById('err').textContent = '';
+  setBusy(true);
+  // PCI iframe only collects card fields; parent must charge after the user fills them
+  // (see matara.pro/nedarimplus/iframe/sample2.html). Prefer CreateTransaction id when present.
+  if (transactionId) {
+    PostNedarim({Name:'FinishTransaction', Value: transactionId});
+    return;
+  }
   PostNedarim({
     Name:'FinishTransaction2',
     Value:{
       Mosad: mosad, ApiValid: apiValid, PaymentType:'Ragil', Currency:'1',
       Amount: amount, Tashlumim:'1', Param2: param2, CallBack: callback, Comment: comment,
-      FirstName:'', LastName:'', Street:'', City:'', Phone:'', Mail:'', Zeout:''
+      FirstName:'', LastName:'', Street:'', City:'', Phone:'', Mail:'', Zeout:'',
+      Groupe:'', CallBackMailError:'', Param1:'', Day:'', ThirdPartyReceipt:'', ForceUpdateMatching:''
     }
   });
+};
+document.getElementById('cancel').onclick = function(){
+  window.parent.postMessage({ type: 'nedarim-cancel' }, '*');
 };
 </script>
 </body>

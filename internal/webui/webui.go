@@ -29,8 +29,11 @@ func Handler() http.Handler {
 			fileServer.ServeHTTP(w, r)
 			return
 		}
-		// SPA client routes: /admin, /d/:id
-		if strings.HasPrefix(r.URL.Path, "/admin") || strings.HasPrefix(r.URL.Path, "/d/") {
+		// SPA client routes: /admin, /d/:id, public legal pages
+		if strings.HasPrefix(r.URL.Path, "/admin") ||
+			strings.HasPrefix(r.URL.Path, "/d/") ||
+			r.URL.Path == "/privacy" ||
+			r.URL.Path == "/support" {
 			serveIndex(w, sub)
 			return
 		}

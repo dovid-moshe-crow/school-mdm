@@ -166,7 +166,7 @@ func (c *Catalog) LookupBundleOpt(ctx context.Context, bundleID string, refresh 
 }
 
 func (c *Catalog) lookupBundleOpt(ctx context.Context, bundleID string, refresh bool) (store.AppMeta, error) {
-	bundleID = strings.ToLower(strings.TrimSpace(bundleID))
+	bundleID = strings.TrimSpace(bundleID)
 	if bundleID == "" {
 		return store.AppMeta{}, fmt.Errorf("bundle_id is required")
 	}
@@ -305,7 +305,7 @@ func mapItunes(r itunesResult, now time.Time, full bool) (store.AppMeta, bool) {
 		developer = strings.TrimSpace(r.SellerName)
 	}
 	meta := store.AppMeta{
-		BundleID:   strings.ToLower(r.BundleID),
+		BundleID:   strings.TrimSpace(r.BundleID), // keep Apple casing (MDM allow-list is case-sensitive)
 		TrackID:    r.TrackID,
 		Name:       title,
 		Artist:     developer,
