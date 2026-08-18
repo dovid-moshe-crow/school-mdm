@@ -1,4 +1,5 @@
-import type { Device, Group } from './api'
+import type { Device, Group, WhitelistPack } from './api'
+import { matchesQuery, searchText } from './search'
 
 export function deviceLabel(d: Device | string, devices?: Device[]): string {
   const row = typeof d === 'string' ? devices?.find((x) => x.enrollment_id === d) : d
@@ -7,18 +8,24 @@ export function deviceLabel(d: Device | string, devices?: Device[]): string {
   return row.name || row.serial_number || row.enrollment_id
 }
 
+export function deviceSearchText(d: Device): string {
+  return searchText(d.name, d.serial_number, d.enrollment_id)
+}
+
+export function groupSearchText(g: Group): string {
+  return searchText(g.name, g.description, g.id)
+}
+
+export function packSearchText(p: WhitelistPack): string {
+  return searchText(p.name, p.description, p.id)
+}
+
 export function deviceMatches(d: Device, query: string): boolean {
-  const q = query.trim().toLowerCase()
-  if (!q) return true
-  return [d.name, d.serial_number, d.enrollment_id].some((s) =>
-    (s || '').toLowerCase().includes(q),
-  )
+  return matchesQuery(query, deviceSearchText(d))
 }
 
 export function groupMatches(g: Group, query: string): boolean {
-  const q = query.trim().toLowerCase()
-  if (!q) return true
-  return [g.name, g.description, g.id].some((s) => (s || '').toLowerCase().includes(q))
+  return matchesQuery(query, groupSearchText(g))
 }
 
 export function deviceOptions(devices: Device[]) {
@@ -33,7 +40,5 @@ export const searchableSelect = {
   showSearch: true,
   optionFilterProp: 'label' as const,
   filterOption: (input: string, option?: { label?: unknown }) =>
-    String(option?.label ?? '')
-      .toLowerCase()
-      .includes(input.trim().toLowerCase()),
+    matchesQuery(input, String(option?.label ?? '')),
 }

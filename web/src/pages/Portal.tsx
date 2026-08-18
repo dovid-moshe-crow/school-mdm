@@ -30,6 +30,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { api, type AccessStatus, type AppMeta, type CreditPackage, type Request } from '../api'
 import { RequestThread } from '../components/RequestThread'
+import { ListSearchBar, SearchableCollection } from '../components/ListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he, studentNextAction } from '../he'
 import { AppThumb, normalizeHostPreview, useDebounced } from '../ui'
@@ -38,6 +39,16 @@ const categories = ['access-url', 'access-app', 'general', 'bug'] as const
 type Category = (typeof categories)[number]
 
 const portalModes = ['store', 'request', 'updates'] as const
+
+const EMPTY_APPS: AppMeta[] = []
+
+function appMetaSearchText(app: AppMeta) {
+  return `${app.app_name} ${app.developer} ${app.bundle_id}`
+}
+
+function requestSearchText(r: Request) {
+  return `${r.app?.app_name || ''} ${r.value} ${r.reason} ${r.status} ${r.type} ${r.last_message?.body || ''}`
+}
 type PortalMode = (typeof portalModes)[number]
 
 const DESC_PREVIEW = 280
@@ -748,24 +759,28 @@ export default function Portal() {
             <Card size="small" title={he.storeAllowed}>
               {allowlistQuery.isLoading || allowedAppsQuery.isLoading ? (
                 <Skeleton active paragraph={{ rows: 2 }} />
-              ) : (allowedAppsQuery.data ?? []).length ? (
-                <List
-                  className="store-app-list"
-                  dataSource={allowedAppsQuery.data}
-                  renderItem={renderStoreApp}
-                />
               ) : (
-                <Empty description={he.storeEmptyAllowed} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                <SearchableCollection
+                  items={allowedAppsQuery.data ?? EMPTY_APPS}
+                  text={appMetaSearchText}
+                  emptyText={he.storeEmptyAllowed}
+                >
+                  {(apps) => (
+                    <List
+                      className="store-app-list"
+                      dataSource={apps}
+                      renderItem={renderStoreApp}
+                    />
+                  )}
+                </SearchableCollection>
               )}
             </Card>
 
             <Card size="small" title={he.storeSearch}>
-              <Input
+              <ListSearchBar
                 value={storeQ}
-                onChange={(e) => void setStoreQ(e.target.value)}
+                onChange={(v) => void setStoreQ(v)}
                 placeholder="YouTube"
-                allowClear
-                autoComplete="off"
                 style={{ marginBottom: 12 }}
               />
               {storeQ.trim() && storeQ.trim().length < 2 ? (
@@ -996,11 +1011,14 @@ export default function Portal() {
         {mode === 'updates' && (
           <div ref={historyRef}>
             <Typography.Paragraph type="secondary">{he.updatesLead}</Typography.Paragraph>
-            {mineQuery.isLoading && !mine.length && <Skeleton active paragraph={{ rows: 3 }} />}
-            {!mineQuery.isLoading && !mine.length && <Empty description={he.noRequests} />}
+            {mineQuery.isLoading && !mine.length ? (
+              <Skeleton active paragraph={{ rows: 3 }} />
+            ) : (
             <Spin spinning={mineQuery.isFetching && !!mine.length}>
+              <SearchableCollection items={mine} text={requestSearchText} emptyText={he.noRequests}>
+                {(rows) => (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                {mine.map((r) => {
+                {rows.map((r) => {
                   const next = studentNextAction(r.type, r.status, r.last_message?.author_role)
                   const isNew = requestActivityAt(r) > updatesSeenAt - 1 && r.status !== 'pending'
                   return (
@@ -1047,7 +1065,10 @@ export default function Portal() {
                   )
                 })}
               </Space>
+                )}
+              </SearchableCollection>
             </Spin>
+            )}
           </div>
         )}
       </Space>

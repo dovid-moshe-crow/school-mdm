@@ -137,6 +137,7 @@ const (
 	ActivityCategoryDevices  = "devices"
 	ActivityCategoryABM      = "abm"
 	ActivityCategorySystem   = "system"
+	ActivityCategoryWebhooks = "webhooks"
 
 	ActivityActorAdmin   = "admin"
 	ActivityActorDevice  = "device"
@@ -177,6 +178,36 @@ type ActivityFilter struct {
 	Q            string // summary ILIKE
 	Limit        int
 	Offset       int
+}
+
+// WebhookEndpoint is an outbound HTTP receiver for activity events.
+type WebhookEndpoint struct {
+	ID          string    `json:"id"`
+	URL         string    `json:"url"`
+	Secret      string    `json:"secret,omitempty"`
+	Description string    `json:"description"`
+	Events      []string  `json:"events"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+const (
+	WebhookDeliveryPending = "pending"
+	WebhookDeliverySuccess = "success"
+	WebhookDeliveryFailed  = "failed"
+)
+
+// WebhookDelivery is one HTTP POST attempt to a webhook endpoint.
+type WebhookDelivery struct {
+	ID         string    `json:"id"`
+	EndpointID string    `json:"endpoint_id"`
+	EventID    string    `json:"event_id"`
+	EventName  string    `json:"event_name"`
+	Status     string    `json:"status"`
+	Attempt    int       `json:"attempt"`
+	HTTPStatus int       `json:"http_status"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // AccessRequest is kept as an alias for older call sites.
@@ -508,4 +539,12 @@ type Store interface {
 	// ApplyAllotmentPeriod expires unused prior-period allotment for this rule,
 	// then grants Amount into allotment_balance. Idempotent on rule+enrollment+period.
 	ApplyAllotmentPeriod(ctx context.Context, in ApplyAllotmentInput) (ApplyAllotmentResult, error)
+
+	ListWebhookEndpoints(ctx context.Context) ([]WebhookEndpoint, error)
+	GetWebhookEndpoint(ctx context.Context, id string) (WebhookEndpoint, error)
+	CreateWebhookEndpoint(ctx context.Context, ep WebhookEndpoint) (WebhookEndpoint, error)
+	UpdateWebhookEndpoint(ctx context.Context, ep WebhookEndpoint) (WebhookEndpoint, error)
+	DeleteWebhookEndpoint(ctx context.Context, id string) error
+	InsertWebhookDelivery(ctx context.Context, d WebhookDelivery) (WebhookDelivery, error)
+	ListWebhookDeliveries(ctx context.Context, endpointID string, limit int) ([]WebhookDelivery, error)
 }

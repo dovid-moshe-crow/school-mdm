@@ -29,6 +29,7 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/store"
 	"github.com/dwdmsh/school-mdm/internal/store/memory"
 	"github.com/dwdmsh/school-mdm/internal/store/postgres"
+	"github.com/dwdmsh/school-mdm/internal/webhooks"
 )
 
 // App is the composition root.
@@ -46,6 +47,8 @@ type App struct {
 	Catalog  *appmeta.Catalog
 	ABM      *abm.Service
 	DepHTTP  http.Handler
+	Activity *activity.Logger
+	Webhooks *webhooks.Service
 	closers  []func()
 }
 
@@ -73,6 +76,9 @@ func New(ctx context.Context) (*App, error) {
 		st = memory.New()
 		log.Info("using memory store (set DATABASE_URL for Neon)")
 	}
+
+	hookSvc := webhooks.New(st, log)
+	actLog := &activity.Logger{Store: st, Slog: log, Webhooks: hookSvc}
 
 	nedarimClient := &nedarim.Client{Cfg: nedarim.Config{
 		Mode:        cfg.NedarimMode,
@@ -133,8 +139,7 @@ func New(ctx context.Context) (*App, error) {
 			SCEPChallenge: cfg.MDMSCEPChallenge,
 			Debug:         cfg.MDMDebug,
 			OnTokenUpdate: func(ctx context.Context, enrollmentID string) {
-				act := &activity.Logger{Store: st, Slog: log}
-				act.Log(ctx, activity.Event{
+				actLog.Log(ctx, activity.Event{
 					Category:     store.ActivityCategoryDevices,
 					Action:       "enroll",
 					ActorType:    store.ActivityActorDevice,
@@ -151,7 +156,7 @@ func New(ctx context.Context) (*App, error) {
 						"enrollment_id", enrollmentID,
 						"err", err,
 					)
-					act.Log(ctx, activity.Event{
+					actLog.Log(ctx, activity.Event{
 						Category:     store.ActivityCategoryDevices,
 						Action:       "enroll_reconcile",
 						ActorType:    store.ActivityActorSystem,
@@ -227,6 +232,8 @@ func New(ctx context.Context) (*App, error) {
 		Catalog:  catalog,
 		ABM:      abmSvc,
 		DepHTTP:  depHTTP,
+		Activity: actLog,
+		Webhooks: hookSvc,
 		closers:  closers,
 	}, nil
 }
@@ -255,7 +262,8 @@ func (a *App) Handler() http.Handler {
 		Enqueue:  a.Enqueue,
 		Stub:     a.Stub,
 		ABM:      a.ABM,
-		Activity: &activity.Logger{Store: a.Store, Slog: a.Log},
+		Activity: a.Activity,
+		Webhooks: a.Webhooks,
 		Log:      a.Log,
 	}
 	if a.Service != nil {
@@ -285,7 +293,10 @@ func (a *App) Run(ctx context.Context) error {
 				return
 			case <-time.After(3 * time.Second):
 			}
-			act := &activity.Logger{Store: a.Store, Slog: a.Log}
+			act := a.Activity
+			if act == nil {
+				act = &activity.Logger{Store: a.Store, Slog: a.Log}
+			}
 			if err := a.Push.ReconcileAllDevices(ctx); err != nil {
 				a.Log.Warn("startup reconcile-all failed", "err", err)
 				act.Log(ctx, activity.Event{

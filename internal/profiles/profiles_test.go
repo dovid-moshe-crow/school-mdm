@@ -135,6 +135,41 @@ func TestBuildRequestWebClipProfile(t *testing.T) {
 	}
 }
 
+func TestBuildCompanionNotificationsProfile(t *testing.T) {
+	raw, err := BuildCompanionNotificationsProfile("com.kfilter.portal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	for _, want := range []string{
+		"com.apple.notificationsettings",
+		CompanionNotificationsIdentifier,
+		"com.kfilter.portal",
+		"NotificationsEnabled",
+		"ShowInNotificationCenter",
+		"ShowInLockScreen",
+		"<true/>",
+		"<key>AlertType</key>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("profile missing %q\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "allowNotificationModification") {
+		t.Fatal("must not lock all device notification settings")
+	}
+}
+
+func TestBuildCompanionNotificationsProfileDefaultBundle(t *testing.T) {
+	raw, err := BuildCompanionNotificationsProfile("  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), DefaultCompanionBundleID) {
+		t.Fatalf("expected default bundle:\n%s", raw)
+	}
+}
+
 func TestBuildStoreWebClipProfile(t *testing.T) {
 	store := DeviceStoreURL("https://mdm.example", "ipad-42")
 	if store != "https://mdm.example/d/ipad-42/store" {

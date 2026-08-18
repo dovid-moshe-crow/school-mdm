@@ -11,19 +11,26 @@ const AllowlistPayloadIdentifier = "com.schoolmdm.allowlists"
 
 // Stable PayloadUUIDs so InstallProfile replaces the same profile on devices.
 const (
-	allowlistProfileUUID = "a1000000-0000-4000-8000-000000000001"
-	allowlistAppsUUID    = "a1000000-0000-4000-8000-000000000002"
-	allowlistWebUUID     = "a1000000-0000-4000-8000-000000000003"
-	webClipProfileUUID      = "a1000000-0000-4000-8000-000000000011"
-	webClipPayloadUUID      = "a1000000-0000-4000-8000-000000000012"
-	storeWebClipProfileUUID = "a1000000-0000-4000-8000-000000000013"
-	storeWebClipPayloadUUID = "a1000000-0000-4000-8000-000000000014"
-	lockScreenProfileUUID   = "a1000000-0000-4000-8000-000000000021"
-	lockScreenPayloadUUID   = "a1000000-0000-4000-8000-000000000022"
+	allowlistProfileUUID      = "a1000000-0000-4000-8000-000000000001"
+	allowlistAppsUUID         = "a1000000-0000-4000-8000-000000000002"
+	allowlistWebUUID          = "a1000000-0000-4000-8000-000000000003"
+	webClipProfileUUID        = "a1000000-0000-4000-8000-000000000011"
+	webClipPayloadUUID        = "a1000000-0000-4000-8000-000000000012"
+	storeWebClipProfileUUID   = "a1000000-0000-4000-8000-000000000013"
+	storeWebClipPayloadUUID   = "a1000000-0000-4000-8000-000000000014"
+	lockScreenProfileUUID     = "a1000000-0000-4000-8000-000000000021"
+	lockScreenPayloadUUID     = "a1000000-0000-4000-8000-000000000022"
+	companionNotifProfileUUID = "a1000000-0000-4000-8000-000000000031"
+	companionNotifPayloadUUID = "a1000000-0000-4000-8000-000000000032"
 )
 
 // LockScreenPayloadIdentifier is the top-level PayloadIdentifier for lock screen text.
 const LockScreenPayloadIdentifier = "com.schoolmdm.lockscreen"
+
+// CompanionNotificationsIdentifier is the profile that forces KFilter notification settings.
+const CompanionNotificationsIdentifier = "com.schoolmdm.companion.notifications"
+
+const DefaultCompanionBundleID = "com.kfilter.portal"
 
 // blockAllSentinelURL keeps Safari in "specific websites only" mode when the
 // school allowlist has zero URLs. iOS treats a missing/empty bookmark allow-list
@@ -259,6 +266,40 @@ func BuildLockScreenMessageProfile(assetTag, footnote string) ([]byte, error) {
 	if footnote != "" {
 		writeKeyStringIndent(&b, 3, "LockScreenFootnote", footnote)
 	}
+	b.WriteString("\t\t</dict>\n\t</array>\n</dict>\n</plist>\n")
+	return []byte(b.String()), nil
+}
+
+// BuildCompanionNotificationsProfile enables Notification Center for the companion
+// app on supervised devices (ADE). AlertType 1 = banners.
+func BuildCompanionNotificationsProfile(bundleID string) ([]byte, error) {
+	bundleID = strings.TrimSpace(bundleID)
+	if bundleID == "" {
+		bundleID = DefaultCompanionBundleID
+	}
+	var b strings.Builder
+	b.WriteString(plistHeader)
+	b.WriteString("<dict>\n")
+	writeKeyString(&b, "PayloadDisplayName", "KFilter Notifications")
+	writeKeyString(&b, "PayloadIdentifier", CompanionNotificationsIdentifier)
+	writeKeyString(&b, "PayloadType", "Configuration")
+	writeKeyString(&b, "PayloadUUID", companionNotifProfileUUID)
+	writeKeyInt(&b, "PayloadVersion", 1)
+	b.WriteString("\t<key>PayloadContent</key>\n\t<array>\n\t\t<dict>\n")
+	writeKeyStringIndent(&b, 3, "PayloadType", "com.apple.notificationsettings")
+	writeKeyStringIndent(&b, 3, "PayloadIdentifier", "com.schoolmdm.companion.notifications.payload")
+	writeKeyStringIndent(&b, 3, "PayloadUUID", companionNotifPayloadUUID)
+	writeKeyIntIndent(&b, 3, "PayloadVersion", 1)
+	b.WriteString("\t\t\t<key>NotificationSettings</key>\n\t\t\t<array>\n\t\t\t\t<dict>\n")
+	writeKeyStringIndent(&b, 5, "BundleIdentifier", bundleID)
+	writeKeyBoolIndent(&b, 5, "NotificationsEnabled", true)
+	writeKeyBoolIndent(&b, 5, "ShowInLockScreen", true)
+	writeKeyBoolIndent(&b, 5, "ShowInNotificationCenter", true)
+	writeKeyBoolIndent(&b, 5, "SoundsEnabled", true)
+	writeKeyBoolIndent(&b, 5, "BadgesEnabled", true)
+	writeKeyIntIndent(&b, 5, "AlertType", 1)
+	writeKeyIntIndent(&b, 5, "GroupingType", 0)
+	b.WriteString("\t\t\t\t</dict>\n\t\t\t</array>\n")
 	b.WriteString("\t\t</dict>\n\t</array>\n</dict>\n</plist>\n")
 	return []byte(b.String()), nil
 }

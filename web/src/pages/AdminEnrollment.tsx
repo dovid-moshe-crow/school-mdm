@@ -18,8 +18,10 @@ import type { ColumnsType } from 'antd/es/table'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, getAdminToken, type AbmDepDevice } from '../api'
+import { ListSearchBar, SearchableEmpty } from '../components/ListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he } from '../he'
+import { matchesQuery } from '../search'
 import { formatRelativeHe } from '../time'
 
 export default function AdminEnrollment() {
@@ -117,11 +119,16 @@ export default function AdminEnrollment() {
   const abmAccount = abmAccountQuery.data
   const abmDepDevices = abmDevicesQuery.data?.devices ?? []
   const visibleAbmDevices = useMemo(() => {
-    const q = abmDeviceQ.trim().toLowerCase()
-    if (!q) return abmDepDevices
     return abmDepDevices.filter((d) =>
-      [d.serial_number, d.model, d.description, d.profile_status, d.os, d.device_family]
-        .some((s) => (s || '').toLowerCase().includes(q)),
+      matchesQuery(
+        abmDeviceQ,
+        d.serial_number,
+        d.model,
+        d.description,
+        d.profile_status,
+        d.os,
+        d.device_family,
+      ),
     )
   }, [abmDepDevices, abmDeviceQ])
 
@@ -551,16 +558,20 @@ export default function AdminEnrollment() {
                 <Empty description={he.abmDevicesEmpty} />
               ) : (
                 <>
-                <Input
-                  allowClear
+                <ListSearchBar
                   placeholder={he.searchDevices}
                   value={abmDeviceQ}
-                  onChange={(e) => setAbmDeviceQ(e.target.value)}
+                  onChange={setAbmDeviceQ}
+                  total={abmDepDevices.length}
+                  shown={visibleAbmDevices.length}
                   style={{ marginBottom: 12 }}
                 />
-                {!visibleAbmDevices.length ? (
-                  <Empty description={he.noMatches} />
-                ) : (
+                <SearchableEmpty
+                  total={abmDepDevices.length}
+                  shown={visibleAbmDevices.length}
+                  emptyText={he.abmDevicesEmpty}
+                />
+                {visibleAbmDevices.length ? (
                 <Table
                   size="small"
                   rowKey="serial_number"
@@ -573,7 +584,7 @@ export default function AdminEnrollment() {
                   pagination={{ pageSize: 10, hideOnSinglePage: true }}
                   scroll={{ x: 820 }}
                 />
-                )}
+                ) : null}
                 </>
               )}
             </Card>

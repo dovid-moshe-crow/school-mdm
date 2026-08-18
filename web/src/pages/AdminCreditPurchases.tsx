@@ -15,8 +15,10 @@ import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, getAdminToken, type CreditPurchase } from '../api'
+import { ListSearchBar } from '../components/ListSearch'
 import { he } from '../he'
 import { deviceLabel, deviceOptions, searchableSelect } from '../labels'
+import { matchesQuery } from '../search'
 import { formatAbsoluteHe, formatRelativeHe } from '../time'
 
 function statusTag(status: string) {
@@ -42,6 +44,7 @@ export default function AdminCreditPurchases() {
   const [status, setStatus] = useState<string | undefined>('paid')
   const [enrollmentId, setEnrollmentId] = useState<string | undefined>()
   const [offset, setOffset] = useState(0)
+  const [q, setQ] = useState('')
   const limit = 40
 
   const devicesQuery = useQuery({
@@ -68,6 +71,21 @@ export default function AdminCreditPurchases() {
   })
 
   const rows = purchasesQuery.data?.purchases ?? []
+  const visibleRows = useMemo(
+    () =>
+      rows.filter((row) =>
+        matchesQuery(
+          q,
+          row.device_name,
+          row.enrollment_id,
+          row.package_name,
+          row.status,
+          row.provider_tx_id,
+          row.client_unique_id,
+        ),
+      ),
+    [rows, q],
+  )
 
   const columns: ColumnsType<CreditPurchase> = [
     {
@@ -164,12 +182,20 @@ export default function AdminCreditPurchases() {
           options={deviceOptions(devicesQuery.data ?? [])}
           {...searchableSelect}
         />
+        <ListSearchBar
+          className="filter-field grow"
+          placeholder={he.searchPlaceholder}
+          value={q}
+          onChange={setQ}
+          total={rows.length}
+          shown={visibleRows.length}
+        />
       </Flex>
       <Table
         size="small"
         rowKey="id"
         loading={purchasesQuery.isLoading}
-        dataSource={rows}
+        dataSource={visibleRows}
         columns={columns}
         scroll={{ x: 650 }}
         pagination={false}

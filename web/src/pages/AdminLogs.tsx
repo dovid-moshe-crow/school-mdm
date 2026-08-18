@@ -19,6 +19,7 @@ import type { Dayjs } from 'dayjs'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, getAdminToken, type ActivityEvent } from '../api'
+import { ListSearchBar } from '../components/ListSearch'
 import { he } from '../he'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { deviceLabel, deviceOptions, searchableSelect } from '../labels'
@@ -236,14 +237,13 @@ export default function AdminLogs() {
               setAction(e.target.value)
             }}
           />
-          <Input.Search
-            allowClear
+          <ListSearchBar
             placeholder={he.activitySearch}
             className="filter-field grow"
             value={q}
-            onChange={(e) => {
+            onChange={(v) => {
               setOffset(0)
-              setQ(e.target.value)
+              setQ(v)
             }}
           />
           <Button

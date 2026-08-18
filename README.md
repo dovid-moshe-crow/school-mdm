@@ -57,6 +57,9 @@ Claim the DB to your Neon account (optional, keeps it permanently) using `PUBLIC
 | GET | `/` | explains device-scoped portal |
 | GET | `/d/{deviceID}` | student portal (device id in URL; `?url=` optional) |
 | GET | `/admin` | admin queue |
+| GET | `/api-docs` | interactive API reference + webhook manager |
+| GET | `/api/openapi.json` | OpenAPI 3.1 for every admin capability |
+| GET/POST/PATCH/DELETE | `/api/webhooks` | outbound activity webhooks (Bearer `ADMIN_TOKENS`) |
 | GET | `/api/apps/search?q=` | App Store search (cache + iTunes fallback) |
 | GET | `/api/apps/{bundleID}` | lookup/cached metadata |
 | POST | `/api/requests` | create request (`enrollment_id` usually from `/d/...`) |

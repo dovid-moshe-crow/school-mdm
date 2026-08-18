@@ -11,8 +11,14 @@ import (
 
 // Logger writes structured audit events (best-effort; never fails callers).
 type Logger struct {
-	Store store.Store
-	Slog  *slog.Logger
+	Store    store.Store
+	Slog     *slog.Logger
+	Webhooks Dispatcher
+}
+
+// Dispatcher fans activity events out to webhook subscribers.
+type Dispatcher interface {
+	Dispatch(ctx context.Context, ev store.ActivityEvent)
 }
 
 // Event is a convenient builder input for Record.
@@ -58,7 +64,7 @@ func (l *Logger) Record(ctx context.Context, e Event) {
 			detail = raw
 		}
 	}
-	_, err := l.Store.InsertActivityEvent(ctx, store.ActivityEvent{
+	saved, err := l.Store.InsertActivityEvent(ctx, store.ActivityEvent{
 		Category:     strings.TrimSpace(e.Category),
 		Action:       strings.TrimSpace(e.Action),
 		ActorType:    actorType,
@@ -73,6 +79,10 @@ func (l *Logger) Record(ctx context.Context, e Event) {
 	})
 	if err != nil && l.Slog != nil {
 		l.Slog.Warn("activity insert", "category", e.Category, "action", e.Action, "err", err)
+		return
+	}
+	if err == nil && l.Webhooks != nil {
+		l.Webhooks.Dispatch(ctx, saved)
 	}
 }
 

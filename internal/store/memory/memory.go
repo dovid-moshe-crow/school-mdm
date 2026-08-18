@@ -45,6 +45,9 @@ type Store struct {
 
 	allotmentRules  map[string]store.CreditAllotmentRule
 	allotmentGrants map[string]store.CreditAllotmentGrant // id -> grant
+
+	webhooks          []store.WebhookEndpoint
+	webhookDeliveries []store.WebhookDelivery
 }
 
 // New creates an empty memory store seeded with essentials as durable entries.

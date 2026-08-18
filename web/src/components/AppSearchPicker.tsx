@@ -1,22 +1,30 @@
-import { Alert, Button, Empty, Flex, Input, List, Spin, Typography } from 'antd'
+import { Alert, Button, Empty, Flex, List, Spin, Tag, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api, type AppMeta } from '../api'
 import { he } from '../he'
 import { AppThumb, useDebounced } from '../ui'
+import { ListSearchBar } from './ListSearch'
 
 export function AppSearchPicker({
   onPick,
   pickLabel = he.pick,
   enrollmentId,
   autoFocus,
+  excludeBundles,
+  placeholder,
+  hint,
 }: {
-  onPick: (app: AppMeta) => void
+  onPick: (app: AppMeta) => void | Promise<void>
   pickLabel?: string
   enrollmentId?: string
   autoFocus?: boolean
+  excludeBundles?: Set<string> | string[]
+  placeholder?: string
+  hint?: string
 }) {
   const [q, setQ] = useState('')
+  const [adding, setAdding] = useState('')
   const debounced = useDebounced(q.trim(), 320)
   const enabled = debounced.length >= 2
   const query = useQuery({
@@ -26,16 +34,20 @@ export function AppSearchPicker({
   })
   const results = query.data ?? []
   const searched = enabled && query.isFetched && !query.isFetching
+  const excluded = excludeBundles instanceof Set ? excludeBundles : new Set(excludeBundles || [])
 
   return (
-    <div>
-      <Input
+    <div className="app-search-picker">
+      {hint ? (
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+          {hint}
+        </Typography.Paragraph>
+      ) : null}
+      <ListSearchBar
         value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder={he.searchApp}
-        allowClear
+        onChange={setQ}
+        placeholder={placeholder || he.searchApp}
         autoFocus={autoFocus}
-        autoComplete="off"
       />
       {!enabled && q.trim() ? (
         <Typography.Text type="secondary">{he.searchMinChars}</Typography.Text>
@@ -65,24 +77,43 @@ export function AppSearchPicker({
       {results.length ? (
         <List
           size="small"
-          style={{ marginTop: 8 }}
+          className="app-search-picker-results"
           dataSource={results}
-          renderItem={(app) => (
-            <List.Item
-              className="tap-row"
-              actions={[
-                <Button key="pick" type="link" onClick={() => onPick(app)}>
-                  {pickLabel}
-                </Button>,
-              ]}
-            >
-              <List.Item.Meta
-                avatar={<AppThumb name={app.app_name} url={app.artwork_url} />}
-                title={app.app_name}
-                description={app.developer ? `${app.developer} · ${app.bundle_id}` : app.bundle_id}
-              />
-            </List.Item>
-          )}
+          renderItem={(app) => {
+            const inList = excluded.has(app.bundle_id)
+            const busy = adding === app.bundle_id
+            return (
+              <List.Item
+                className="tap-row"
+                actions={[
+                  inList ? (
+                    <Tag key="in" color="green">
+                      {he.packInPack}
+                    </Tag>
+                  ) : (
+                    <Button
+                      key="pick"
+                      type="link"
+                      loading={busy}
+                      disabled={!!adding}
+                      onClick={() => {
+                        setAdding(app.bundle_id)
+                        void Promise.resolve(onPick(app)).finally(() => setAdding(''))
+                      }}
+                    >
+                      {pickLabel}
+                    </Button>
+                  ),
+                ]}
+              >
+                <List.Item.Meta
+                  avatar={<AppThumb name={app.app_name} url={app.artwork_url} />}
+                  title={app.app_name}
+                  description={app.developer ? `${app.developer} · ${app.bundle_id}` : app.bundle_id}
+                />
+              </List.Item>
+            )
+          }}
         />
       ) : null}
     </div>

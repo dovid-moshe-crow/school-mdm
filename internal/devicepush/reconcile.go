@@ -160,7 +160,7 @@ func (s *Service) PushCompanionConfig(ctx context.Context, enrollmentID string) 
 	}
 	bundle := strings.TrimSpace(settings.CompanionBundleID)
 	if bundle == "" {
-		bundle = "com.kfilter.portal"
+		bundle = profiles.DefaultCompanionBundleID
 	}
 	portalBase := strings.TrimRight(strings.TrimSpace(s.PortalURL), "/")
 	cfg := map[string]string{"enrollment_id": id}
@@ -175,6 +175,9 @@ func (s *Service) PushCompanionConfig(ctx context.Context, enrollmentID string) 
 	}
 	if err := s.Enqueue.SetApplicationConfiguration(ctx, id, bundle, cfg); err != nil {
 		return fmt.Errorf("companion config: %w", err)
+	}
+	if err := s.EnsureCompanionNotifications(ctx, id, bundle); err != nil {
+		return fmt.Errorf("companion notifications: %w", err)
 	}
 	return nil
 }
@@ -194,11 +197,14 @@ func (s *Service) EnsureCompanionApp(ctx context.Context, enrollmentID string) e
 		return nil // settings optional during early boot
 	}
 	if !settings.CompanionEnabled {
+		if err := s.Enqueue.RemoveProfile(ctx, id, profiles.CompanionNotificationsIdentifier); err != nil && s.Log != nil {
+			s.Log.Warn("remove companion notifications profile", "enrollment_id", id, "err", err)
+		}
 		return nil
 	}
 	bundle := strings.TrimSpace(settings.CompanionBundleID)
 	if bundle == "" {
-		bundle = "com.kfilter.portal"
+		bundle = profiles.DefaultCompanionBundleID
 	}
 	portalBase := strings.TrimRight(strings.TrimSpace(s.PortalURL), "/")
 	cfg := map[string]string{
@@ -223,7 +229,27 @@ func (s *Service) EnsureCompanionApp(ctx context.Context, enrollmentID string) e
 	if err := s.Enqueue.SetApplicationConfiguration(ctx, id, bundle, cfg); err != nil {
 		return fmt.Errorf("companion config: %w", err)
 	}
+	if err := s.EnsureCompanionNotifications(ctx, id, bundle); err != nil {
+		return fmt.Errorf("companion notifications: %w", err)
+	}
 	return nil
+}
+
+// EnsureCompanionNotifications installs a supervised Notifications payload so KFilter
+// alerts are on (banners, lock screen, sounds, badges) without the student prompt.
+func (s *Service) EnsureCompanionNotifications(ctx context.Context, enrollmentID, bundleID string) error {
+	if s == nil || s.Enqueue == nil {
+		return fmt.Errorf("devicepush not configured")
+	}
+	id := strings.TrimSpace(enrollmentID)
+	if id == "" {
+		return nil
+	}
+	profile, err := profiles.BuildCompanionNotificationsProfile(bundleID)
+	if err != nil {
+		return err
+	}
+	return s.Enqueue.InstallProfile(ctx, id, profile)
 }
 
 func (s *Service) associateCompanionLicense(ctx context.Context, settings store.MDMSettings, enrollmentID string) error {

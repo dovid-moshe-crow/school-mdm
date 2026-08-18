@@ -33,7 +33,8 @@ func Handler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/admin") ||
 			strings.HasPrefix(r.URL.Path, "/d/") ||
 			r.URL.Path == "/privacy" ||
-			r.URL.Path == "/support" {
+			r.URL.Path == "/support" ||
+			r.URL.Path == "/api-docs" {
 			serveIndex(w, sub)
 			return
 		}

@@ -23,6 +23,11 @@ export default function Home() {
               {he.openAdmin}
             </Button>
           </Link>
+          <Link to="/api-docs">
+            <Button block style={{ marginTop: 8 }}>
+              {he.openApiDocs}
+            </Button>
+          </Link>
         </Card>
       </Space>
     </div>

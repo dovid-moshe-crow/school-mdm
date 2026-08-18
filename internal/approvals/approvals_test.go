@@ -43,9 +43,9 @@ func TestApproveAccessCreatesGrantAndEnqueuesProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertContains(t, urls, "example.com/lesson")
-	// Reconcile installs school allowlist + help web clip + store web clip.
-	if n := len(stub.Snapshot()); n != 3 {
-		t.Fatalf("expected 3 stub commands (allowlist+help+store webclips), got %d", n)
+	// Reconcile installs school allowlist + legacy lock-screen remove + help + store web clips.
+	if n := len(stub.Snapshot()); n != 4 {
+		t.Fatalf("expected 4 stub commands (allowlist+lockscreen-remove+help+store), got %d", n)
 	}
 }
 
@@ -56,8 +56,8 @@ func TestApproveBugResolvesWithoutEnqueue(t *testing.T) {
 	svc := &Service{Store: mem, Enqueue: stub, PortalURL: "http://localhost:8080"}
 
 	req, err := svc.CreateRequest(ctx, CreateRequestInput{
-		Type:  store.TypeBug,
-		Value: "Safari crashes on portal",
+		Type:   store.TypeBug,
+		Value:  "Safari crashes on portal",
 		Reason: "opens then blank",
 	})
 	if err != nil {

@@ -30,6 +30,7 @@ import {
 import { AppSearchPicker } from '../components/AppSearchPicker'
 import { DeviceActionModals } from '../components/DeviceActionModals'
 import { DeviceMdmActions } from '../components/DeviceMdmActions'
+import { SearchableCollection } from '../components/ListSearch'
 import { deviceStatusFromInfo } from '../components/MdmCommandResultView'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
@@ -40,6 +41,11 @@ import { AppThumb } from '../ui'
 const EMPTY_DEVICES: Device[] = []
 const EMPTY_GROUPS: Group[] = []
 const EMPTY_ALLOWANCES: Allowance[] = []
+const EMPTY_STRINGS: string[] = []
+
+function allowanceSearchText(row: Allowance) {
+  return `${row.app?.app_name || ''} ${row.value} ${row.kind}`
+}
 
 export default function DeviceAdmin() {
   const { deviceId = '' } = useParams<{ deviceId: string }>()
@@ -375,21 +381,33 @@ export default function DeviceAdmin() {
           ) : (
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
               <Typography.Text type="secondary">{he.whitelistApps}</Typography.Text>
-              <Space wrap size={[4, 4]}>
-                {(effectiveQuery.data?.apps || []).length ? (
-                  effectiveQuery.data!.apps.map((app) => <Tag key={app}>{app}</Tag>)
-                ) : (
-                  <Typography.Text type="secondary">{he.emptyAllow}</Typography.Text>
+              <SearchableCollection
+                items={effectiveQuery.data?.apps || EMPTY_STRINGS}
+                text={(app) => app}
+                emptyText={he.emptyAllow}
+              >
+                {(apps) => (
+                  <Space wrap size={[4, 4]}>
+                    {apps.map((app) => (
+                      <Tag key={app}>{app}</Tag>
+                    ))}
+                  </Space>
                 )}
-              </Space>
+              </SearchableCollection>
               <Typography.Text type="secondary">{he.whitelistWeb}</Typography.Text>
-              <Space wrap size={[4, 4]}>
-                {(effectiveQuery.data?.urls || []).length ? (
-                  effectiveQuery.data!.urls.map((u) => <Tag key={u}>{u}</Tag>)
-                ) : (
-                  <Typography.Text type="secondary">{he.emptyAllow}</Typography.Text>
+              <SearchableCollection
+                items={effectiveQuery.data?.urls || EMPTY_STRINGS}
+                text={(u) => u}
+                emptyText={he.emptyAllow}
+              >
+                {(urls) => (
+                  <Space wrap size={[4, 4]}>
+                    {urls.map((u) => (
+                      <Tag key={u}>{u}</Tag>
+                    ))}
+                  </Space>
                 )}
-              </Space>
+              </SearchableCollection>
             </Space>
           )}
         </Card>
@@ -401,12 +419,17 @@ export default function DeviceAdmin() {
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <div>
               <Typography.Text strong>{he.whitelistApps}</Typography.Text>
-              <List
-                size="small"
-                style={{ marginTop: 8 }}
-                locale={{ emptyText: he.emptyAllow }}
-                dataSource={deviceApps}
-                renderItem={(row) => (
+              <div style={{ marginTop: 8 }}>
+                <SearchableCollection
+                  items={deviceApps}
+                  text={allowanceSearchText}
+                  emptyText={he.emptyAllow}
+                >
+                  {(rows) => (
+                    <List
+                      size="small"
+                      dataSource={rows}
+                      renderItem={(row) => (
                   <List.Item
                     actions={[
                       <Button key="rev" type="link" danger size="small" onClick={() => void revokeRow(row)}>
@@ -420,20 +443,28 @@ export default function DeviceAdmin() {
                       description={row.value}
                     />
                   </List.Item>
-                )}
-              />
+                      )}
+                    />
+                  )}
+                </SearchableCollection>
+              </div>
               <div style={{ marginTop: 8 }}>
                 <AppSearchPicker pickLabel={he.addToAllow} onPick={(app) => void addApp(app)} />
               </div>
             </div>
             <div>
               <Typography.Text strong>{he.whitelistWeb}</Typography.Text>
-              <List
-                size="small"
-                style={{ marginTop: 8 }}
-                locale={{ emptyText: he.emptyAllow }}
-                dataSource={deviceUrls}
-                renderItem={(row) => (
+              <div style={{ marginTop: 8 }}>
+                <SearchableCollection
+                  items={deviceUrls}
+                  text={allowanceSearchText}
+                  emptyText={he.emptyAllow}
+                >
+                  {(rows) => (
+                    <List
+                      size="small"
+                      dataSource={rows}
+                      renderItem={(row) => (
                   <List.Item
                     actions={[
                       <Button key="rev" type="link" danger size="small" onClick={() => void revokeRow(row)}>
@@ -443,8 +474,11 @@ export default function DeviceAdmin() {
                   >
                     <Typography.Text>{row.value}</Typography.Text>
                   </List.Item>
-                )}
-              />
+                      )}
+                    />
+                  )}
+                </SearchableCollection>
+              </div>
               <Input.TextArea
                 style={{ marginTop: 8 }}
                 rows={3}

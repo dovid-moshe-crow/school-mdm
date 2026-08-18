@@ -1,6 +1,7 @@
 import {
   InboxOutlined,
   MobileOutlined,
+  PlusOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -41,7 +42,7 @@ import {
   useQueryStates,
 } from 'nuqs'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import {
   api,
   getAdminToken,
@@ -59,18 +60,23 @@ import {
   type WhitelistPack,
 } from '../api'
 import { AppSearchPicker } from '../components/AppSearchPicker'
+import { DevicePickList } from '../components/CheckablePickList'
 import { DeviceActionModals } from '../components/DeviceActionModals'
 import { DeviceMdmActions } from '../components/DeviceMdmActions'
+import { ListSearchBar, SearchableCollection, SearchableEmpty } from '../components/ListSearch'
+import { PackEditor } from '../components/PackEditor'
 import { RequestThread } from '../components/RequestThread'
+import { useListSearch } from '../hooks/useListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
 import { he, statusClass, adminNextAction } from '../he'
 import {
   deviceLabel,
-  deviceMatches,
   deviceOptions,
-  groupMatches,
+  deviceSearchText,
   groupOptions,
+  groupSearchText,
+  packSearchText,
   searchableSelect,
 } from '../labels'
 import { formatRelativeHe } from '../time'
@@ -88,6 +94,21 @@ const EMPTY_REQUESTS: Request[] = []
 const EMPTY_GROUPS: Group[] = []
 const EMPTY_DEVICES: Device[] = []
 const EMPTY_ALLOWANCES: Allowance[] = []
+const EMPTY_PACKS: WhitelistPack[] = []
+
+function sameIds(a: string[], b: string[]) {
+  if (a.length !== b.length) return false
+  const set = new Set(a)
+  return b.every((id) => set.has(id))
+}
+
+function packageSearchText(pkg: CreditPackage) {
+  return `${pkg.name_he} ${pkg.credits} ${pkg.id}`
+}
+
+function allotmentSearchText(rule: CreditAllotmentRule) {
+  return `${rule.name || ''} ${rule.note || ''} ${rule.target_type} ${rule.target_id || ''} ${rule.interval}`
+}
 
 function labelDevice(d: Device | string, devices: Device[]) {
   return deviceLabel(d, devices)
@@ -192,9 +213,10 @@ export default function Admin() {
 
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
+  const [createGroupOpen, setCreateGroupOpen] = useState(false)
   const [members, setMembers] = useState<string[]>([])
-  const [memberFilter, setMemberFilter] = useState('')
   const [renameDraft, setRenameDraft] = useState('')
+  const [descDraft, setDescDraft] = useState('')
 
   const [addOpen, setAddOpen] = useState(false)
   const [addKind, setAddKind] = useState('url')
@@ -242,15 +264,8 @@ export default function Admin() {
     'wmode',
     parseAsStringLiteral(['packs', 'oneoffs'] as const).withDefault('packs'),
   )
-  const [deviceSearch, setDeviceSearch] = useState('')
-  const [groupSearch, setGroupSearch] = useState('')
-  const [packSearch, setPackSearch] = useState('')
   const [selectedPackId, setSelectedPackId] = useState('')
   const [newPackName, setNewPackName] = useState('')
-  const [packAssignScope, setPackAssignScope] = useState<'global' | 'group' | 'device'>('group')
-  const [packAssignTarget, setPackAssignTarget] = useState('')
-  const [packItemKind, setPackItemKind] = useState<'app' | 'url'>('app')
-  const [packItemValue, setPackItemValue] = useState('')
 
   const devicesQuery = useQuery({
     queryKey: ['devices'],
@@ -304,7 +319,11 @@ export default function Admin() {
   }, [abmSettingsQuery.data])
   const devices = devicesQuery.data ?? EMPTY_DEVICES
   const groups = groupsQuery.data ?? EMPTY_GROUPS
+  const packs = packsQuery.data ?? EMPTY_PACKS
   const drawerDevice = devices.find((d) => d.enrollment_id === deviceDrawerId)
+  const devicesSearch = useListSearch(devices, deviceSearchText)
+  const groupsSearch = useListSearch(groups, groupSearchText)
+  const packsSearch = useListSearch(packs, packSearchText)
 
   async function runBulk(op: string, extra?: { group_id?: string; message?: string }) {
     if (!selectedIds.length) return
@@ -524,34 +543,16 @@ export default function Admin() {
   useEffect(() => {
     if (!selectedGroup) return
     setRenameDraft(selectedGroup.name)
+    setDescDraft(selectedGroup.description || '')
   }, [selectedGroup])
 
   useEffect(() => {
     if (membersQuery.data) setMembers(membersQuery.data)
   }, [membersQuery.data])
 
-  const filteredDevices = useMemo(
-    () => devices.filter((d) => deviceMatches(d, memberFilter)),
-    [devices, memberFilter],
-  )
-  const visibleDevices = useMemo(
-    () => devices.filter((d) => deviceMatches(d, deviceSearch)),
-    [devices, deviceSearch],
-  )
-  const visibleGroups = useMemo(
-    () => groups.filter((g) => groupMatches(g, groupSearch)),
-    [groups, groupSearch],
-  )
-  const visiblePacks = useMemo(() => {
-    const q = packSearch.trim().toLowerCase()
-    const list = packsQuery.data ?? []
-    if (!q) return list
-    return list.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.description || '').toLowerCase().includes(q),
-    )
-  }, [packsQuery.data, packSearch])
+  const visibleDevices = devicesSearch.visible
+  const visibleGroups = groupsSearch.visible
+  const visiblePacks = packsSearch.visible
 
   const isMobile = useIsMobile()
 
@@ -745,12 +746,11 @@ export default function Admin() {
                       </div>
                       <div className="filter-field grow">
                         <Typography.Text type="secondary">{he.search}</Typography.Text>
-                        <Input
+                        <ListSearchBar
                           style={{ marginTop: 4 }}
                           value={reqFilters.q}
-                          onChange={(e) => void setReqFilters({ q: e.target.value })}
+                          onChange={(v) => void setReqFilters({ q: v })}
                           placeholder={he.searchPlaceholder}
-                          allowClear
                         />
                       </div>
                     </Flex>
@@ -997,182 +997,217 @@ export default function Admin() {
               children: metaLoading ? (
                 <LoadingBlock />
               ) : (
+                <>
+                <Modal
+                  open={createGroupOpen}
+                  title={he.createGroup}
+                  okText={he.createGroup}
+                  okButtonProps={{ disabled: !newName.trim() }}
+                  onCancel={() => setCreateGroupOpen(false)}
+                  onOk={async () => {
+                    try {
+                      const g = await api.createGroup(newName.trim(), newDesc.trim())
+                      setNewName('')
+                      setNewDesc('')
+                      setCreateGroupOpen(false)
+                      message.success(he.ok)
+                      await refreshMeta()
+                      await openGroup(g)
+                    } catch (e) {
+                      message.error((e as Error).message)
+                    }
+                  }}
+                >
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Input
+                      placeholder={he.groupName}
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      autoFocus
+                    />
+                    <Input
+                      placeholder={he.groupDescPlaceholder}
+                      value={newDesc}
+                      onChange={(e) => setNewDesc(e.target.value)}
+                    />
+                  </Space>
+                </Modal>
                 <Row gutter={[16, 16]}>
                   {(!isMobile || !selectedGroup) && (
-                  <Col xs={24} md={12}>
-                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                      <Card title={he.createGroup} size="small">
-                        <Space direction="vertical" style={{ width: '100%' }}>
-                          <Input
-                            placeholder={he.groupName}
-                            value={newName}
-                            onChange={(e) => setNewName(e.target.value)}
-                          />
-                          <Input
-                            placeholder={he.groupDesc}
-                            value={newDesc}
-                            onChange={(e) => setNewDesc(e.target.value)}
-                          />
-                          <Button
-                            type="primary"
-                            block
-                            disabled={!newName.trim()}
-                            onClick={async () => {
-                              try {
-                                const g = await api.createGroup(newName.trim(), newDesc.trim())
-                                setNewName('')
-                                setNewDesc('')
-                                message.success(he.ok)
-                                await refreshMeta()
-                                await openGroup(g)
-                              } catch (e) {
-                                message.error((e as Error).message)
-                              }
-                            }}
-                          >
-                            {he.createGroup}
-                          </Button>
-                        </Space>
-                      </Card>
-                      <Input
-                        allowClear
-                        placeholder={he.searchGroups}
-                        value={groupSearch}
-                        onChange={(e) => setGroupSearch(e.target.value)}
-                      />
-                      {!groups.length && <Empty description={he.noGroups} />}
-                      {!!groups.length && !visibleGroups.length && (
-                        <Empty description={he.noMatches} />
-                      )}
-                      {visibleGroups.map((g) => (
-                        <Card
-                          key={g.id}
+                  <Col xs={24} md={10} lg={8}>
+                    <Card
+                      size="small"
+                      className="group-list-card"
+                      title={he.tabGroups}
+                      extra={
+                        <Button
+                          type="primary"
                           size="small"
-                          style={
-                            selectedGroup?.id === g.id
-                              ? { outline: '2px solid #0b6e4f', outlineOffset: 2 }
-                              : undefined
-                          }
+                          icon={<PlusOutlined />}
+                          onClick={() => setCreateGroupOpen(true)}
                         >
-                          <Flex justify="space-between" gap={12} align="start" wrap="wrap">
-                            <div style={{ minWidth: 0, flex: '1 1 180px' }}>
-                              <Typography.Text strong>{g.name}</Typography.Text>{' '}
-                              <Tag>
-                                {g.member_count ?? 0} {he.memberCount}
-                              </Tag>
-                              {g.description && (
-                                <div>
-                                  <Typography.Text type="secondary">{g.description}</Typography.Text>
-                                </div>
-                              )}
-                            </div>
-                            <Space wrap style={{ width: isMobile ? '100%' : undefined }}>
-                              <Button size="small" block={isMobile} onClick={() => void openGroup(g)}>
-                                {he.openGroup}
-                              </Button>
-                              <Button
-                                size="small"
-                                block={isMobile}
-                                onClick={() => {
-                                  void setTab('whitelists')
-                                  void setWhitelistMode('oneoffs')
-                                  void setAllowFilters({
-                                    ascope: 'group',
-                                    agroup: g.id,
-                                  })
-                                }}
+                          {he.createGroup}
+                        </Button>
+                      }
+                    >
+                      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                        <ListSearchBar
+                          value={groupsSearch.query}
+                          onChange={groupsSearch.setQuery}
+                          placeholder={he.searchGroups}
+                          total={groupsSearch.total}
+                          shown={visibleGroups.length}
+                        />
+                        <SearchableEmpty
+                          total={groups.length}
+                          shown={visibleGroups.length}
+                          emptyText={he.noGroups}
+                        />
+                        {visibleGroups.length ? (
+                          <List
+                            size="small"
+                            dataSource={visibleGroups}
+                            renderItem={(g) => (
+                              <List.Item
+                                className={
+                                  selectedGroup?.id === g.id
+                                    ? 'tap-row group-list-row is-active'
+                                    : 'tap-row group-list-row'
+                                }
+                                onClick={() => void openGroup(g)}
                               >
-                                {he.viewAllow}
-                              </Button>
-                            </Space>
-                          </Flex>
-                        </Card>
-                      ))}
-                    </Space>
+                                <List.Item.Meta
+                                  title={
+                                    <Flex justify="space-between" gap={8} align="center">
+                                      <Typography.Text ellipsis style={{ flex: 1, minWidth: 0 }}>
+                                        {g.name}
+                                      </Typography.Text>
+                                      <Tag style={{ marginInlineEnd: 0 }}>
+                                        {g.member_count ?? 0} {he.memberCount}
+                                      </Tag>
+                                    </Flex>
+                                  }
+                                  description={g.description || undefined}
+                                />
+                              </List.Item>
+                            )}
+                          />
+                        ) : null}
+                      </Space>
+                    </Card>
                   </Col>
                   )}
                   {(!isMobile || selectedGroup) && (
-                  <Col xs={24} md={12}>
+                  <Col xs={24} md={14} lg={16}>
                     {!selectedGroup && (
-                      <Empty description="בחרו קבוצה" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                      <Empty description={he.pickGroupFirst} image={Empty.PRESENTED_IMAGE_SIMPLE} />
                     )}
                     {selectedGroup && (
                       <Card
                         size="small"
                         title={selectedGroup.name}
                         extra={
-                          <Button type="link" onClick={() => void setSelectedGroupId(null)}>
-                            {isMobile ? he.back : he.close}
-                          </Button>
+                          <Space>
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                void setTab('whitelists')
+                                void setWhitelistMode('oneoffs')
+                                void setAllowFilters({
+                                  ascope: 'group',
+                                  agroup: selectedGroup.id,
+                                })
+                              }}
+                            >
+                              {he.viewAllow}
+                            </Button>
+                            <Button type="link" onClick={() => void setSelectedGroupId(null)}>
+                              {isMobile ? he.back : he.close}
+                            </Button>
+                          </Space>
                         }
                       >
                         <Spin spinning={membersQuery.isFetching}>
                           <Space direction="vertical" style={{ width: '100%' }} size="middle">
                             {membersQuery.isLoading && !membersQuery.data ? (
-                              <Skeleton active paragraph={{ rows: 4 }} />
+                              <Skeleton active paragraph={{ rows: 6 }} />
                             ) : (
                               <>
                                 <div>
                                   <Typography.Text type="secondary">{he.rename}</Typography.Text>
-                                  <Flex gap={8} style={{ marginTop: 4 }}>
-                                    <Input
-                                      value={renameDraft}
-                                      onChange={(e) => setRenameDraft(e.target.value)}
-                                    />
-                                    <Button
-                                      type="primary"
-                                      onClick={async () => {
-                                        await api.updateGroup(
-                                          selectedGroup.id,
-                                          renameDraft.trim(),
-                                          selectedGroup.description,
-                                        )
-                                        message.success(he.ok)
-                                        void refreshMeta()
-                                      }}
-                                    >
-                                      {he.save}
-                                    </Button>
-                                  </Flex>
+                                  <Input
+                                    style={{ marginTop: 4 }}
+                                    value={renameDraft}
+                                    onChange={(e) => setRenameDraft(e.target.value)}
+                                  />
                                 </div>
                                 <div>
-                                  <Typography.Text type="secondary">{he.members}</Typography.Text>
+                                  <Typography.Text type="secondary">{he.groupDesc}</Typography.Text>
                                   <Input
-                                    style={{ marginTop: 4, marginBottom: 8 }}
-                                    value={memberFilter}
-                                    onChange={(e) => setMemberFilter(e.target.value)}
-                                    placeholder={he.filterDevices}
-                                    allowClear
+                                    style={{ marginTop: 4 }}
+                                    placeholder={he.groupDescPlaceholder}
+                                    value={descDraft}
+                                    onChange={(e) => setDescDraft(e.target.value)}
                                   />
-                                  <Checkbox.Group
-                                    style={{ width: '100%' }}
-                                    value={members}
-                                    onChange={(vals) => setMembers(vals as string[])}
-                                  >
-                                    <Space direction="vertical">
-                                      {filteredDevices.map((d) => (
-                                        <Checkbox key={d.enrollment_id} value={d.enrollment_id}>
-                                          {labelDevice(d, devices)}
-                                        </Checkbox>
-                                      ))}
-                                    </Space>
-                                  </Checkbox.Group>
-                                  {!devices.length && (
-                                    <Typography.Text type="secondary">
-                                      {he.emptyDevices}
-                                    </Typography.Text>
-                                  )}
                                 </div>
-                                <Space>
+                                {(renameDraft.trim() !== selectedGroup.name ||
+                                  descDraft.trim() !== (selectedGroup.description || '')) && (
                                   <Button
                                     type="primary"
                                     onClick={async () => {
-                                      setMembers(await api.setMembers(selectedGroup.id, members))
-                                      message.success(he.ok)
-                                      void refreshMeta()
-                                      void qc.invalidateQueries({
-                                        queryKey: ['group-members', selectedGroup.id],
-                                      })
+                                      try {
+                                        await api.updateGroup(
+                                          selectedGroup.id,
+                                          renameDraft.trim() || selectedGroup.name,
+                                          descDraft.trim(),
+                                        )
+                                        message.success(he.ok)
+                                        void refreshMeta()
+                                      } catch (e) {
+                                        message.error((e as Error).message)
+                                      }
+                                    }}
+                                  >
+                                    {he.saveGroup}
+                                  </Button>
+                                )}
+                                <div>
+                                  <Flex justify="space-between" align="baseline" wrap="wrap" gap={8}>
+                                    <Typography.Text strong>
+                                      {he.members} · {members.length}/{devices.length}
+                                    </Typography.Text>
+                                    {!sameIds(members, membersQuery.data ?? []) ? (
+                                      <Typography.Text type="warning">
+                                        {he.membersUnsaved}
+                                      </Typography.Text>
+                                    ) : null}
+                                  </Flex>
+                                  <Typography.Paragraph type="secondary" style={{ margin: '4px 0 8px' }}>
+                                    {he.membersHint}
+                                  </Typography.Paragraph>
+                                  <DevicePickList
+                                    key={selectedGroup.id}
+                                    devices={devices}
+                                    selectedKeys={members}
+                                    onChange={setMembers}
+                                    groupNameById={(id) => groups.find((g) => g.id === id)?.name}
+                                  />
+                                </div>
+                                <Flex justify="space-between" wrap="wrap" gap={8}>
+                                  <Button
+                                    type="primary"
+                                    disabled={sameIds(members, membersQuery.data ?? [])}
+                                    onClick={async () => {
+                                      try {
+                                        setMembers(await api.setMembers(selectedGroup.id, members))
+                                        message.success(he.ok)
+                                        void refreshMeta()
+                                        void qc.invalidateQueries({
+                                          queryKey: ['group-members', selectedGroup.id],
+                                        })
+                                      } catch (e) {
+                                        message.error((e as Error).message)
+                                      }
                                     }}
                                   >
                                     {he.saveMembers}
@@ -1192,7 +1227,7 @@ export default function Admin() {
                                   >
                                     {he.delete}
                                   </Button>
-                                </Space>
+                                </Flex>
                               </>
                             )}
                           </Space>
@@ -1202,6 +1237,7 @@ export default function Admin() {
                   </Col>
                   )}
                 </Row>
+                </>
               ),
             },
             {
@@ -1249,18 +1285,20 @@ export default function Admin() {
                           </Button>
                         </Space.Compact>
                       </Card>
-                      <Input
-                        allowClear
+                      <ListSearchBar
                         placeholder={he.searchPacks}
-                        value={packSearch}
-                        onChange={(e) => setPackSearch(e.target.value)}
+                        value={packsSearch.query}
+                        onChange={packsSearch.setQuery}
+                        total={packsSearch.total}
+                        shown={visiblePacks.length}
                       />
                       {packsQuery.isLoading ? <LoadingBlock /> : null}
-                      {!packsQuery.isLoading && !(packsQuery.data?.length) ? (
-                        <Empty description={he.emptyPacks} />
-                      ) : null}
-                      {!packsQuery.isLoading && !!(packsQuery.data?.length) && !visiblePacks.length ? (
-                        <Empty description={he.noMatches} />
+                      {!packsQuery.isLoading ? (
+                        <SearchableEmpty
+                          total={packs.length}
+                          shown={visiblePacks.length}
+                          emptyText={he.emptyPacks}
+                        />
                       ) : null}
                       <List
                         dataSource={visiblePacks}
@@ -1304,227 +1342,21 @@ export default function Admin() {
                         open={!!selectedPackId}
                         onClose={() => setSelectedPackId('')}
                         title={packDetailQuery.data?.pack.name || he.packsTab}
-                        width={isMobile ? '100%' : 440}
+                        width={isMobile ? '100%' : 520}
                         placement={isMobile ? 'bottom' : 'right'}
                         height={isMobile ? '92%' : undefined}
                       >
                         {packDetailQuery.isLoading ? <LoadingBlock /> : null}
                         {packDetailQuery.data ? (
-                          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                            <Card size="small" title={he.packItems}>
-                              <Space direction="vertical" style={{ width: '100%' }}>
-                                <Segmented
-                                  block
-                                  value={packItemKind}
-                                  onChange={(v) => setPackItemKind(v as 'app' | 'url')}
-                                  options={[
-                                    { value: 'app', label: he.whitelistApps },
-                                    { value: 'url', label: he.whitelistWeb },
-                                  ]}
-                                />
-                                {packItemKind === 'app' ? (
-                                  <AppSearchPicker
-                                    pickLabel={he.addToAllow}
-                                    onPick={async (app) => {
-                                      try {
-                                        await api.addPackItem(
-                                          selectedPackId,
-                                          'app',
-                                          app.bundle_id,
-                                        )
-                                        message.success(he.ok)
-                                        void qc.invalidateQueries({
-                                          queryKey: ['pack', selectedPackId],
-                                        })
-                                        void qc.invalidateQueries({ queryKey: ['packs'] })
-                                      } catch (err) {
-                                        message.error((err as Error).message)
-                                      }
-                                    }}
-                                  />
-                                ) : (
-                                  <Space.Compact style={{ width: '100%' }}>
-                                    <Input
-                                      value={packItemValue}
-                                      onChange={(e) => setPackItemValue(e.target.value)}
-                                      placeholder="example.com"
-                                    />
-                                    <Button
-                                      type="primary"
-                                      disabled={!packItemValue.trim()}
-                                      onClick={async () => {
-                                        try {
-                                          await api.addPackItem(
-                                            selectedPackId,
-                                            'url',
-                                            packItemValue.trim(),
-                                          )
-                                          setPackItemValue('')
-                                          message.success(he.ok)
-                                          void qc.invalidateQueries({
-                                            queryKey: ['pack', selectedPackId],
-                                          })
-                                          void qc.invalidateQueries({ queryKey: ['packs'] })
-                                        } catch (err) {
-                                          message.error((err as Error).message)
-                                        }
-                                      }}
-                                    >
-                                      {he.addAllow}
-                                    </Button>
-                                  </Space.Compact>
-                                )}
-                                <List
-                                  size="small"
-                                  dataSource={packDetailQuery.data.items}
-                                  locale={{ emptyText: he.emptyAllow }}
-                                  renderItem={(it) => (
-                                    <List.Item
-                                      actions={[
-                                        <Button
-                                          key="rm"
-                                          type="link"
-                                          danger
-                                          size="small"
-                                          onClick={async () => {
-                                            try {
-                                              await api.removePackItem(
-                                                selectedPackId,
-                                                it.kind,
-                                                it.value,
-                                              )
-                                              message.success(he.ok)
-                                              void qc.invalidateQueries({
-                                                queryKey: ['pack', selectedPackId],
-                                              })
-                                              void qc.invalidateQueries({ queryKey: ['packs'] })
-                                            } catch (err) {
-                                              message.error((err as Error).message)
-                                            }
-                                          }}
-                                        >
-                                          {he.removeOverride}
-                                        </Button>,
-                                      ]}
-                                    >
-                                      <Tag>{it.kind === 'app' ? 'app' : 'url'}</Tag> {it.value}
-                                    </List.Item>
-                                  )}
-                                />
-                              </Space>
-                            </Card>
-                            <Card size="small" title={he.packAssign}>
-                              <Space direction="vertical" style={{ width: '100%' }}>
-                                <Segmented
-                                  block
-                                  value={packAssignScope}
-                                  onChange={(v) => {
-                                    setPackAssignScope(v as 'global' | 'group' | 'device')
-                                    setPackAssignTarget('')
-                                  }}
-                                  options={[
-                                    { value: 'global', label: he.global },
-                                    { value: 'group', label: he.group },
-                                    { value: 'device', label: he.deviceEffective },
-                                  ]}
-                                />
-                                {packAssignScope === 'group' ? (
-                                  <Select
-                                    style={{ width: '100%' }}
-                                    placeholder={he.group}
-                                    value={packAssignTarget || undefined}
-                                    onChange={setPackAssignTarget}
-                                    options={groupOptions(groups)}
-                                    {...searchableSelect}
-                                  />
-                                ) : null}
-                                {packAssignScope === 'device' ? (
-                                  <Select
-                                    style={{ width: '100%' }}
-                                    placeholder={he.tabDevices}
-                                    value={packAssignTarget || undefined}
-                                    onChange={setPackAssignTarget}
-                                    options={deviceOptions(devices)}
-                                    {...searchableSelect}
-                                  />
-                                ) : null}
-                                <Button
-                                  type="primary"
-                                  disabled={
-                                    packAssignScope !== 'global' && !packAssignTarget.trim()
-                                  }
-                                  onClick={async () => {
-                                    try {
-                                      await api.addPackAssignment(selectedPackId, {
-                                        scope: packAssignScope,
-                                        group_id:
-                                          packAssignScope === 'group'
-                                            ? packAssignTarget
-                                            : undefined,
-                                        enrollment_id:
-                                          packAssignScope === 'device'
-                                            ? packAssignTarget
-                                            : undefined,
-                                      })
-                                      message.success(he.ok)
-                                      void qc.invalidateQueries({
-                                        queryKey: ['pack', selectedPackId],
-                                      })
-                                    } catch (err) {
-                                      message.error((err as Error).message)
-                                    }
-                                  }}
-                                >
-                                  {he.packAssign}
-                                </Button>
-                                <Typography.Text type="secondary">
-                                  {he.packAssignedTo}
-                                </Typography.Text>
-                                <List
-                                  size="small"
-                                  dataSource={packDetailQuery.data.assignments}
-                                  locale={{ emptyText: '—' }}
-                                  renderItem={(as) => (
-                                    <List.Item
-                                      actions={[
-                                        <Button
-                                          key="rm"
-                                          type="link"
-                                          danger
-                                          size="small"
-                                          onClick={async () => {
-                                            try {
-                                              await api.removePackAssignment(
-                                                selectedPackId,
-                                                as.target_type,
-                                                as.target_id,
-                                              )
-                                              message.success(he.ok)
-                                              void qc.invalidateQueries({
-                                                queryKey: ['pack', selectedPackId],
-                                              })
-                                            } catch (err) {
-                                              message.error((err as Error).message)
-                                            }
-                                          }}
-                                        >
-                                          {he.removeOverride}
-                                        </Button>,
-                                      ]}
-                                    >
-                                      <Tag>{as.target_type}</Tag>{' '}
-                                      {as.target_type === 'group'
-                                        ? groups.find((g) => g.id === as.target_id)?.name ||
-                                          as.target_id
-                                        : as.target_type === 'device'
-                                          ? labelDevice(as.target_id, devices)
-                                          : he.global}
-                                    </List.Item>
-                                  )}
-                                />
-                              </Space>
-                            </Card>
-                          </Space>
+                          <PackEditor
+                            key={selectedPackId}
+                            packId={selectedPackId}
+                            pack={packDetailQuery.data.pack}
+                            items={packDetailQuery.data.items}
+                            assignments={packDetailQuery.data.assignments}
+                            groups={groups}
+                            devices={devices}
+                          />
                         ) : null}
                       </Drawer>
                     </Space>
@@ -1590,12 +1422,11 @@ export default function Admin() {
                             {...searchableSelect}
                           />
                         )}
-                        <Input
+                        <ListSearchBar
                           style={{ flex: 1, minWidth: isMobile ? '100%' : 180 }}
                           value={allowFilters.aq}
-                          onChange={(e) => void setAllowFilters({ aq: e.target.value })}
+                          onChange={(v) => void setAllowFilters({ aq: v })}
                           placeholder={he.searchPlaceholder}
-                          allowClear
                         />
                         <Button
                           type="primary"
@@ -1869,16 +1700,18 @@ export default function Admin() {
                 <LoadingBlock />
               ) : (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Input
-                    allowClear
+                  <ListSearchBar
                     placeholder={he.searchDevices}
-                    value={deviceSearch}
-                    onChange={(e) => setDeviceSearch(e.target.value)}
+                    value={devicesSearch.query}
+                    onChange={devicesSearch.setQuery}
+                    total={devicesSearch.total}
+                    shown={visibleDevices.length}
                   />
-                  {!devices.length && <Empty description={he.mdmNoDevices} />}
-                  {!!devices.length && !visibleDevices.length && (
-                    <Empty description={he.noMatches} />
-                  )}
+                  <SearchableEmpty
+                    total={devices.length}
+                    shown={visibleDevices.length}
+                    emptyText={he.mdmNoDevices}
+                  />
                   {selectedIds.length > 0 ? (
                     <Card size="small">
                       <div className="bulk-bar">
@@ -2219,11 +2052,15 @@ export default function Admin() {
                     </Typography.Text>
                     {allotmentsQuery.isLoading ? (
                       <Skeleton active paragraph={{ rows: 3 }} />
-                    ) : !(allotmentsQuery.data ?? []).length ? (
-                      <Empty description={he.emptyAllow} />
                     ) : (
+                      <SearchableCollection
+                        items={allotmentsQuery.data ?? []}
+                        text={allotmentSearchText}
+                        emptyText={he.emptyAllow}
+                      >
+                        {(rows) => (
                       <Space direction="vertical" style={{ width: '100%' }} size="small">
-                        {(allotmentsQuery.data ?? []).map((rule) => (
+                        {rows.map((rule) => (
                           <Card key={rule.id} size="small" type="inner">
                             <Flex justify="space-between" align="flex-start" gap={12} wrap="wrap">
                               <div>
@@ -2310,6 +2147,8 @@ export default function Admin() {
                           </Card>
                         ))}
                       </Space>
+                        )}
+                      </SearchableCollection>
                     )}
                   </Card>
 
@@ -2324,11 +2163,15 @@ export default function Admin() {
                   >
                     {creditPackagesQuery.isLoading ? (
                       <Skeleton active paragraph={{ rows: 3 }} />
-                    ) : !(creditPackagesQuery.data ?? []).length ? (
-                      <Empty description={he.emptyAllow} />
                     ) : (
+                      <SearchableCollection
+                        items={creditPackagesQuery.data ?? []}
+                        text={packageSearchText}
+                        emptyText={he.emptyAllow}
+                      >
+                        {(rows) => (
                       <Space direction="vertical" style={{ width: '100%' }} size="small">
-                        {(creditPackagesQuery.data ?? []).map((pkg) => (
+                        {rows.map((pkg) => (
                           <Card key={pkg.id} size="small" type="inner">
                             <Flex justify="space-between" align="flex-start" gap={12} wrap="wrap">
                               <div>
@@ -2384,6 +2227,8 @@ export default function Admin() {
                           </Card>
                         ))}
                       </Space>
+                        )}
+                      </SearchableCollection>
                     )}
                   </Card>
 
@@ -2767,6 +2612,19 @@ export default function Admin() {
                         {he.mdmSaveToken}
                       </Button>
                     </Space.Compact>
+                  </Card>
+                  <Card
+                    size="small"
+                    title={he.apiDocsSettingsTitle}
+                    extra={
+                      <Link to="/api-docs">
+                        <Button type="primary">{he.apiDocsOpen}</Button>
+                      </Link>
+                    }
+                  >
+                    <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                      {he.apiDocsSettingsLead}
+                    </Typography.Paragraph>
                   </Card>
                   <Card size="small" title={he.lockScreenTitle}>
                     <Space direction="vertical" style={{ width: '100%' }} size="middle">

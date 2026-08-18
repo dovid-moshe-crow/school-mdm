@@ -946,6 +946,65 @@ export const api = {
       { headers: adminHeaders() },
     ).then((r) => json<MdmCommandResult>(r))
   },
+  openapi() {
+    return fetch('/api/openapi.json').then((r) => json<OpenAPISpec>(r))
+  },
+  webhookEvents() {
+    return fetch('/api/webhooks/events').then((r) =>
+      json<{ events: WebhookEventInfo[]; filters: string[] }>(r),
+    )
+  },
+  webhooks() {
+    return fetch('/api/webhooks', { headers: adminHeaders() }).then((r) =>
+      json<{ endpoints: WebhookEndpoint[] }>(r),
+    )
+  },
+  createWebhook(body: {
+    url: string
+    secret?: string
+    description?: string
+    events?: string[]
+    enabled?: boolean
+  }) {
+    return fetch('/api/webhooks', {
+      method: 'POST',
+      headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<WebhookEndpoint>(r))
+  },
+  updateWebhook(
+    id: string,
+    body: {
+      url?: string
+      secret?: string
+      description?: string
+      events?: string[]
+      enabled?: boolean
+    },
+  ) {
+    return fetch(`/api/webhooks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<WebhookEndpoint>(r))
+  },
+  deleteWebhook(id: string) {
+    return fetch(`/api/webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: adminHeaders(),
+    }).then((r) => json<{ ok: boolean }>(r))
+  },
+  webhookDeliveries(id: string, limit = 50) {
+    return fetch(`/api/webhooks/${encodeURIComponent(id)}/deliveries?limit=${limit}`, {
+      headers: adminHeaders(),
+    }).then((r) => json<{ deliveries: WebhookDelivery[] }>(r))
+  },
+  testWebhook(id: string) {
+    return fetch(`/api/webhooks/${encodeURIComponent(id)}/test`, {
+      method: 'POST',
+      headers: adminHeaders(),
+    }).then((r) => json<WebhookDelivery>(r))
+  },
 }
 
 export type CreditPackage = {
@@ -1008,4 +1067,63 @@ export type CreditLedgerEntry = {
   ref_id?: string
   note?: string
   created_at: string
+}
+
+export type WebhookEndpoint = {
+  id: string
+  url: string
+  secret?: string
+  description: string
+  events: string[]
+  enabled: boolean
+  created_at: string
+}
+
+export type WebhookDelivery = {
+  id: string
+  endpoint_id: string
+  event_id: string
+  event_name: string
+  status: string
+  attempt: number
+  http_status: number
+  error?: string
+  created_at: string
+}
+
+export type WebhookEventInfo = {
+  name: string
+  category: string
+  action: string
+  description: string
+}
+
+export type OpenAPIParameter = {
+  name: string
+  in: 'path' | 'query' | 'header'
+  required?: boolean
+  description?: string
+  schema?: { type?: string }
+}
+
+export type OpenAPIOperation = {
+  tags?: string[]
+  summary?: string
+  description?: string
+  operationId?: string
+  security?: unknown[]
+  parameters?: OpenAPIParameter[]
+  requestBody?: {
+    required?: boolean
+    content?: {
+      'application/json'?: { schema?: { type?: string; properties?: Record<string, unknown> } }
+    }
+  }
+}
+
+export type OpenAPISpec = {
+  openapi?: string
+  info: { title: string; description?: string; version: string }
+  tags?: { name: string; description?: string }[]
+  paths: Record<string, Record<string, OpenAPIOperation>>
 }

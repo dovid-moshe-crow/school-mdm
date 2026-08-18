@@ -4,7 +4,6 @@ import {
   Card,
   Descriptions,
   Flex,
-  Input,
   List,
   Tag,
   Typography,
@@ -13,6 +12,8 @@ import { useState, type ReactNode } from 'react'
 import type { MdmCommandResult } from '../api'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he } from '../he'
+import { matchesQuery } from '../search'
+import { ListSearchBar } from './ListSearch'
 
 export function formatMdmQueryValue(key: string, value: unknown): string {
   if (value == null) return '—'
@@ -185,26 +186,28 @@ export function MdmCommandResultView({ result }: { result: MdmCommandResult }) {
           'he',
         ),
       )
-    const q = listFilter.trim().toLowerCase()
-    const filtered = !q
-      ? apps
-      : apps.filter((app) => {
-          const hay = `${app.Name || ''} ${app.Identifier || ''}`.toLowerCase()
-          return hay.includes(q)
-        })
+    const filtered = apps.filter((app) =>
+      matchesQuery(
+        listFilter,
+        String(app.Name ?? ''),
+        String(app.Identifier ?? ''),
+        String(app.ShortVersion ?? ''),
+        String(app.Version ?? ''),
+      ),
+    )
     return (
       <div className="mdm-result-view">
         <MdmResultToolbar
           onShowRaw={() => setShowRaw(true)}
           title={he.mdmAppsCount.replace('{n}', String(apps.length))}
         />
-        {apps.length > 8 ? (
-          <Input
-            allowClear
-            size="middle"
+        {apps.length ? (
+          <ListSearchBar
             value={listFilter}
-            onChange={(e) => setListFilter(e.target.value)}
+            onChange={setListFilter}
             placeholder={he.search}
+            total={apps.length}
+            shown={filtered.length}
             style={{ marginBottom: 8 }}
           />
         ) : null}
@@ -259,26 +262,27 @@ export function MdmCommandResultView({ result }: { result: MdmCommandResult }) {
           'he',
         ),
       )
-    const q = listFilter.trim().toLowerCase()
-    const filtered = !q
-      ? profiles
-      : profiles.filter((p) => {
-          const hay = `${p.PayloadDisplayName || ''} ${p.PayloadIdentifier || ''}`.toLowerCase()
-          return hay.includes(q)
-        })
+    const filtered = profiles.filter((p) =>
+      matchesQuery(
+        listFilter,
+        String(p.PayloadDisplayName ?? ''),
+        String(p.PayloadIdentifier ?? ''),
+        String(p.PayloadOrganization ?? ''),
+      ),
+    )
     return (
       <div className="mdm-result-view">
         <MdmResultToolbar
           onShowRaw={() => setShowRaw(true)}
           title={he.mdmProfilesCount.replace('{n}', String(profiles.length))}
         />
-        {profiles.length > 8 ? (
-          <Input
-            allowClear
-            size="middle"
+        {profiles.length ? (
+          <ListSearchBar
             value={listFilter}
-            onChange={(e) => setListFilter(e.target.value)}
+            onChange={setListFilter}
             placeholder={he.search}
+            total={profiles.length}
+            shown={filtered.length}
             style={{ marginBottom: 8 }}
           />
         ) : null}

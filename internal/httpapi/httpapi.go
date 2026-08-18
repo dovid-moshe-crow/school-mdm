@@ -21,6 +21,7 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/notify"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
+	"github.com/dwdmsh/school-mdm/internal/webhooks"
 	"github.com/dwdmsh/school-mdm/internal/webui"
 )
 
@@ -38,6 +39,7 @@ type API struct {
 	ABM      *abm.Service
 	Notify   *notify.Service
 	Activity *activity.Logger
+	Webhooks *webhooks.Service
 	Log      *slog.Logger
 
 	accessMu    sync.Mutex
@@ -47,6 +49,7 @@ type API struct {
 // Mount registers routes on mux.
 func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
+	mux.HandleFunc("GET /api/openapi.json", a.handleOpenAPI)
 	mux.HandleFunc("GET /api/allowlist", a.handleAllowlist)
 	mux.HandleFunc("GET /api/allowances", a.handleListAllowances)
 	mux.HandleFunc("POST /api/allowances", a.handleCreateAllowance)
@@ -156,6 +159,15 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mdm/abm/profile", a.handleABMGetProfile)
 	mux.HandleFunc("POST /api/mdm/abm/profile", a.requireAdmin(a.handleABMDefineProfile))
 	mux.HandleFunc("POST /api/mdm/abm/assign", a.requireAdmin(a.handleABMAssignProfile))
+
+	mux.HandleFunc("GET /api/webhooks/events", a.handleWebhookEvents)
+	mux.HandleFunc("GET /api/webhooks", a.requireAdmin(a.handleListWebhooks))
+	mux.HandleFunc("POST /api/webhooks", a.requireAdmin(a.handleCreateWebhook))
+	mux.HandleFunc("GET /api/webhooks/{id}", a.requireAdmin(a.handleGetWebhook))
+	mux.HandleFunc("PATCH /api/webhooks/{id}", a.requireAdmin(a.handleUpdateWebhook))
+	mux.HandleFunc("DELETE /api/webhooks/{id}", a.requireAdmin(a.handleDeleteWebhook))
+	mux.HandleFunc("GET /api/webhooks/{id}/deliveries", a.requireAdmin(a.handleListWebhookDeliveries))
+	mux.HandleFunc("POST /api/webhooks/{id}/test", a.requireAdmin(a.handleTestWebhook))
 
 	mux.Handle("/", webui.Handler())
 }
