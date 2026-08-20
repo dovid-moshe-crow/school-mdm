@@ -189,9 +189,7 @@ func (a *API) handleMDMBulk(w http.ResponseWriter, r *http.Request) {
 				if a.Notify != nil {
 					a.Notify.UnrestrictedChanged(r.Context(), id, true)
 				}
-				if a.Push != nil {
-					err = a.Push.Reconcile(r.Context(), id)
-				}
+				a.pushOneLater(id)
 			}
 		case "restrict":
 			err = a.Store.SetDeviceUnrestricted(r.Context(), id, false)
@@ -202,9 +200,7 @@ func (a *API) handleMDMBulk(w http.ResponseWriter, r *http.Request) {
 				if a.Notify != nil {
 					a.Notify.UnrestrictedChanged(r.Context(), id, false)
 				}
-				if a.Push != nil {
-					err = a.Push.Reconcile(r.Context(), id)
-				}
+				a.pushOneLater(id)
 			}
 		case "lock":
 			if live, ok := a.live(); ok {
@@ -256,9 +252,7 @@ func (a *API) handleMDMBulk(w http.ResponseWriter, r *http.Request) {
 					a.auditAction(r, actionGroupMemberAdd, map[string]any{
 						"group_id": gid, "enrollment_id": id, "bulk": true,
 					})
-					if a.Push != nil {
-						err = a.Push.Reconcile(r.Context(), id)
-					}
+					a.pushOneLater(id)
 				}
 			}
 		// Legacy ops kept for API compatibility; not shown in UI.
@@ -270,7 +264,7 @@ func (a *API) handleMDMBulk(w http.ResponseWriter, r *http.Request) {
 			}
 		case "reconcile":
 			if a.Push != nil {
-				err = a.Push.Reconcile(r.Context(), id)
+				a.pushOneLater(id)
 			} else {
 				err = errUnavailable
 			}

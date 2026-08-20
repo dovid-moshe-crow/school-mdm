@@ -229,8 +229,19 @@ func OpenAPISpec() map[string]any {
 			},
 		}),
 	}))
+	add("post", "/api/devices/{id}/groups", "Devices", "Add device to group", "Membership change; MDM reconcile runs in the background.", true, merge(params(pathParam("id", "Enrollment id")), map[string]any{
+		"requestBody": jsonBody(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"group_id": map[string]any{"type": "string"}},
+			"required":   []string{"group_id"},
+		}),
+	}))
+	add("delete", "/api/devices/{id}/groups/{groupId}", "Devices", "Remove device from group", "", true, params(
+		pathParam("id", "Enrollment id"),
+		pathParam("groupId", "Group id"),
+	))
 
-	add("get", "/api/apps/search", "Apps", "Search App Store", "", false, params(queryParam("q", "Search text"), queryParam("enrollment_id", "Optional enrollment for access status")))
+	add("get", "/api/apps/search", "Apps", "Search App Store", "Also matches known system apps and accepts a raw bundle id.", false, params(queryParam("q", "Search text or bundle id"), queryParam("enrollment_id", "Optional enrollment for access status")))
 	add("get", "/api/apps/lookup", "Apps", "Look up many apps", "Resolves friendly names and icons for bundle IDs (cache, known system apps, App Store).", false,
 		params(queryParam("id", "Repeat for each bundle id"), queryParam("ids", "Comma-separated bundle ids"), queryParam("fetch", "0 to skip App Store")))
 	add("get", "/api/apps/{bundleID}", "Apps", "Look up app", "", false, merge(params(pathParam("bundleID", "iOS bundle id"), queryParam("full", "1 for a full lookup"), queryParam("enrollment_id", "Optional enrollment")), nil))
@@ -400,6 +411,15 @@ func OpenAPISpec() map[string]any {
 	add("post", "/api/mdm/abm/assign", "ABM", "Assign DEP profile", "", true, map[string]any{
 		"requestBody": jsonBody(map[string]any{"type": "object", "additionalProperties": true}),
 	})
+
+	add("get", "/api/admin/tokens", "Admin", "List API tokens", "Managed Bearer tokens for scripts. The secret is never stored.", true, nil)
+	add("post", "/api/admin/tokens", "Admin", "Create API token", "Returns the raw token once. Send it as Authorization: Bearer …", true, map[string]any{
+		"requestBody": jsonBody(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string", "example": "n8n"}},
+		}),
+	})
+	add("delete", "/api/admin/tokens/{id}", "Admin", "Revoke API token", "", true, params(pathParam("id", "Token id")))
 
 	add("get", "/api/webhooks/events", "Webhooks", "Event catalog", "Names you can subscribe to, plus * and category.* filters.", true, nil)
 	add("get", "/api/webhooks", "Webhooks", "List webhook endpoints", "", true, nil)

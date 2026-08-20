@@ -50,6 +50,7 @@ type Store struct {
 
 	webhooks          []store.WebhookEndpoint
 	webhookDeliveries []store.WebhookDelivery
+	apiTokens         []store.APIToken
 	policyTimers      map[string]store.PolicyTimer
 	systemAllowlist   map[string]store.SystemAllowlistItem
 }

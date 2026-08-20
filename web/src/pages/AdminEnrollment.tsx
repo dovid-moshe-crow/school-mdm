@@ -83,9 +83,18 @@ export default function AdminEnrollment() {
     ;(async () => {
       setBusy('abm-sync')
       try {
-        const data = await api.abmSync()
+        const prev = abmDevicesQuery.data?.synced_at
+        await api.abmSync()
         if (cancelled) return
-        qc.setQueryData(['abm-devices'], data)
+        const started = Date.now()
+        while (!cancelled && Date.now() - started < 45000) {
+          const cached = await api.abmDevices()
+          if (cached.synced_at && cached.synced_at !== prev) {
+            qc.setQueryData(['abm-devices'], cached)
+            break
+          }
+          await new Promise((r) => setTimeout(r, 800))
+        }
       } catch {
         // Keep empty cache UI; user can press Sync manually.
       } finally {
@@ -134,12 +143,25 @@ export default function AdminEnrollment() {
   async function syncDevices() {
     setBusy('abm-sync')
     try {
+      const prev = abmDevicesQuery.data?.synced_at
       const data = await api.abmSync()
-      qc.setQueryData(['abm-devices'], data)
-      const n = data.devices?.length ?? 0
-      const assigned = data.assigned ?? 0
-      if (data.assign_error) {
-        message.error(data.assign_error)
+      let latest = data
+      if (data.status === 'accepted' || !data.devices) {
+        message.success(he.abmSyncStarted)
+        const started = Date.now()
+        while (Date.now() - started < 45000) {
+          await new Promise((r) => setTimeout(r, 800))
+          latest = await api.abmDevices()
+          if (latest.synced_at && latest.synced_at !== prev) break
+        }
+      }
+      qc.setQueryData(['abm-devices'], latest)
+      const n = latest.devices?.length ?? 0
+      const assigned = latest.assigned ?? 0
+      if (latest.assign_error) {
+        message.error(latest.assign_error)
+      } else if (data.status === 'accepted') {
+        message.success(`${he.ok} — ${n} ${he.abmDevicesCount}`)
       } else if (!abmProfileUUID.trim()) {
         message.success(`${he.ok} — ${n} ${he.abmDevicesCount}`)
         if (n > 0) message.warning(he.abmAssignNeedProfile)

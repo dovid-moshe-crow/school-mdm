@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
@@ -367,9 +368,12 @@ func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 		})
 		// Lock screen asset tag uses the display name — refresh that profile.
 		if a.Push != nil {
-			if err := a.Push.EnsureLockScreenMessage(r.Context(), id); err != nil && a.Log != nil {
-				a.Log.Warn("lock screen after rename", "enrollment_id", id, "err", err)
-			}
+			enrollmentID := id
+			a.goJob("lock-screen", func(ctx context.Context) {
+				if err := a.Push.EnsureLockScreenMessage(ctx, enrollmentID); err != nil && a.Log != nil {
+					a.Log.Warn("lock screen after rename", "enrollment_id", enrollmentID, "err", err)
+				}
+			})
 		}
 	}
 	if body.Unrestricted != nil {
@@ -383,12 +387,7 @@ func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 		if a.Notify != nil {
 			a.Notify.UnrestrictedChanged(r.Context(), id, *body.Unrestricted)
 		}
-		if a.Push != nil {
-			if err := a.Push.Reconcile(r.Context(), id); err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-				return
-			}
-		}
+		a.pushOneLater(id)
 	}
 	d, err := a.Store.GetDevice(r.Context(), id)
 	if err != nil {

@@ -21,6 +21,8 @@ type Service struct {
 	Notify    *notify.Service    // optional Expo push for students
 	PortalURL string
 	Credits   CreditSpender // optional; when set, access requests cost credits
+	// AsyncPush reconciles devices after approve without blocking the HTTP caller.
+	AsyncPush bool
 }
 
 // CreditSpender is satisfied by *credits.Service (kept narrow to avoid import cycles).
@@ -187,10 +189,8 @@ func (s *Service) Decide(ctx context.Context, in DecideInput) (store.Request, er
 		if err != nil {
 			return store.Request{}, err
 		}
-		for _, enrollmentID := range devices {
-			if err := s.pushAllowlistProfile(ctx, enrollmentID); err != nil {
-				return store.Request{}, fmt.Errorf("approved but enqueue failed for %s: %w", enrollmentID, err)
-			}
+		if err := s.pushDevices(ctx, devices); err != nil {
+			return store.Request{}, err
 		}
 		s.notifyDecided(ctx, req)
 		return req, nil
@@ -364,6 +364,27 @@ func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (
 		return s.Push.EffectiveAllowlist(ctx, enrollmentID)
 	}
 	return (&devicepush.Service{Store: s.Store}).EffectiveAllowlist(ctx, enrollmentID)
+}
+
+func (s *Service) pushDevices(ctx context.Context, devices []string) error {
+	ids := append([]string(nil), devices...)
+	run := func(ctx context.Context) error {
+		for _, enrollmentID := range ids {
+			if err := s.pushAllowlistProfile(ctx, enrollmentID); err != nil {
+				return fmt.Errorf("approved but enqueue failed for %s: %w", enrollmentID, err)
+			}
+		}
+		return nil
+	}
+	if !s.AsyncPush {
+		return run(ctx)
+	}
+	go func() {
+		bg, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		_ = run(bg)
+	}()
+	return nil
 }
 
 func (s *Service) pushAllowlistProfile(ctx context.Context, enrollmentID string) error {

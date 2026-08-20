@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -227,13 +228,9 @@ func (a *API) handleMDMReconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	err := a.Push.Reconcile(r.Context(), id)
-	a.auditMDM(r, "reconcile", id, "סנכרון מדיניות למכשיר", err, nil)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "reconciled"})
+	a.auditMDM(r, "reconcile", id, "סנכרון מדיניות למכשיר", nil, nil)
+	a.pushOneLater(id)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (a *API) handleMDMClearAllowlist(w http.ResponseWriter, r *http.Request) {
@@ -242,13 +239,13 @@ func (a *API) handleMDMClearAllowlist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	err := a.Push.ClearAllowlist(r.Context(), id)
-	a.auditMDM(r, "clear_allowlist", id, "נוקה פרופיל הרשימה המותרת", err, nil)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+	a.auditMDM(r, "clear_allowlist", id, "נוקה פרופיל הרשימה המותרת", nil, nil)
+	a.goJob("clear-allowlist", func(ctx context.Context) {
+		if err := a.Push.ClearAllowlist(ctx, id); err != nil && a.Log != nil {
+			a.Log.Warn("background clear allowlist", "enrollment_id", id, "err", err)
+		}
+	})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (a *API) handleMDMPushCert(w http.ResponseWriter, r *http.Request) {

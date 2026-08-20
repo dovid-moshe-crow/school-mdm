@@ -244,15 +244,25 @@ func (a *API) handleABMSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ABM/DEP not configured"})
 		return
 	}
-	devices, err := a.ABM.SyncDevices(r.Context())
+	actorType, actor := a.adminActor(r)
+	a.goJob("abm-sync", func(ctx context.Context) {
+		a.runABMSync(ctx, actorType, actor)
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted"})
+}
+
+func (a *API) runABMSync(ctx context.Context, actorType, actor string) {
+	devices, err := a.ABM.SyncDevices(ctx)
 	if err != nil {
-		a.auditAdmin(r, store.ActivityCategoryABM, "abm_sync", "סנכרון מכשירי ABM נכשל",
-			map[string]any{"error": err.Error()}, "", "")
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.auditCtx(ctx, activity.Event{
+			Category: store.ActivityCategoryABM, Action: "abm_sync",
+			ActorType: actorType, Actor: actor, Result: store.ActivityResultError,
+			Summary: "סנכרון מכשירי ABM נכשל", Detail: map[string]any{"error": err.Error()},
+		})
 		return
 	}
 	profileUUID := ""
-	if settings, sErr := a.Store.GetMDMSettings(r.Context()); sErr == nil {
+	if settings, sErr := a.Store.GetMDMSettings(ctx); sErr == nil {
 		profileUUID = strings.TrimSpace(settings.DEPProfileUUID)
 	}
 	need := abm.SerialsNeedingProfile(devices.Devices, profileUUID)
@@ -264,47 +274,45 @@ func (a *API) handleABMSync(w http.ResponseWriter, r *http.Request) {
 		if end > len(need) {
 			end = len(need)
 		}
-		if _, err := a.ABM.AssignProfile(r.Context(), profileUUID, need[i:end]); err != nil {
+		if _, err := a.ABM.AssignProfile(ctx, profileUUID, need[i:end]); err != nil {
 			assignErr = err.Error()
-			a.auditAdmin(r, store.ActivityCategoryABM, "abm_assign", "שיוך פרופיל הרשמה אחרי סנכרון נכשל",
-				map[string]any{"profile_uuid": profileUUID, "devices": len(need), "assigned": assigned, "error": assignErr}, "", "")
+			a.auditCtx(ctx, activity.Event{
+				Category: store.ActivityCategoryABM, Action: "abm_assign",
+				ActorType: actorType, Actor: actor, Result: store.ActivityResultError,
+				Summary: "שיוך פרופיל הרשמה אחרי סנכרון נכשל",
+				Detail:  map[string]any{"profile_uuid": profileUUID, "devices": len(need), "assigned": assigned, "error": assignErr},
+			})
 			break
 		}
 		assigned += end - i
 	}
 	if assigned > 0 {
-		a.auditAdmin(r, store.ActivityCategoryABM, "abm_assign", "שויך פרופיל הרשמה למכשירים בלי פרופיל",
-			map[string]any{"profile_uuid": profileUUID, "devices": assigned}, "", "")
-		if refreshed, rErr := a.ABM.SyncDevices(r.Context()); rErr == nil {
+		a.auditCtx(ctx, activity.Event{
+			Category: store.ActivityCategoryABM, Action: "abm_assign",
+			ActorType: actorType, Actor: actor, Result: store.ActivityResultOK,
+			Summary: "שויך פרופיל הרשמה למכשירים בלי פרופיל",
+			Detail:  map[string]any{"profile_uuid": profileUUID, "devices": assigned},
+		})
+		if refreshed, rErr := a.ABM.SyncDevices(ctx); rErr == nil {
 			devices = refreshed
 		}
 	}
 	raw, err := json.Marshal(devices.Devices)
 	if err != nil {
-		writeErr(w, err)
 		return
 	}
-	cache, err := a.Store.SaveABMDeviceCache(r.Context(), raw)
-	if err != nil {
-		writeErr(w, err)
+	if _, err := a.Store.SaveABMDeviceCache(ctx, raw); err != nil {
 		return
 	}
-	a.auditAdmin(r, store.ActivityCategoryABM, "abm_sync", "סונכרנו מכשירים מ-Apple",
-		map[string]any{"devices": len(devices.Devices), "assigned": assigned, "needed": len(need)}, "", "")
-	out := map[string]any{
-		"devices":        devices.Devices,
-		"cursor":         devices.Cursor,
-		"fetched_until":  devices.FetchedUntil,
-		"more_to_follow": devices.MoreToFollow,
-		"synced_at":      cache.SyncedAt,
-		"cached":         false,
-		"assigned":       assigned,
-		"needed":         len(need),
-	}
+	detail := map[string]any{"devices": len(devices.Devices), "assigned": assigned, "needed": len(need)}
 	if assignErr != "" {
-		out["assign_error"] = assignErr
+		detail["assign_error"] = assignErr
 	}
-	writeJSON(w, http.StatusOK, out)
+	a.auditCtx(ctx, activity.Event{
+		Category: store.ActivityCategoryABM, Action: "abm_sync",
+		ActorType: actorType, Actor: actor, Result: store.ActivityResultOK,
+		Summary: "סונכרנו מכשירים מ-Apple", Detail: detail,
+	})
 }
 
 func (a *API) handleABMListDevices(w http.ResponseWriter, r *http.Request) {

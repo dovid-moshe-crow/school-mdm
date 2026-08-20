@@ -170,7 +170,13 @@ func (s *Service) Apply(ctx context.Context, t store.PolicyTimer) (ApplyResult, 
 	}
 	res.Devices = len(devices)
 	if s.Push != nil && len(devices) > 0 {
-		_ = s.Push.ReconcileMany(ctx, devices)
+		copied := append([]string(nil), devices...)
+		push := s.Push
+		go func() {
+			bg, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			_ = push.ReconcileMany(bg, copied)
+		}()
 	}
 	return res, nil
 }

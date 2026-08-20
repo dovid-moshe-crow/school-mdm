@@ -175,7 +175,7 @@ func (a *API) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if a.Push != nil && len(touched) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), touched)
+		a.pushManyLater(touched)
 	}
 	members, err := a.Store.ListGroupMembers(r.Context(), id)
 	if err != nil {
@@ -183,6 +183,71 @@ func (a *API) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, members)
+}
+
+func (a *API) handleAddDeviceToGroup(w http.ResponseWriter, r *http.Request) {
+	enrollmentID := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		GroupID string `json:"group_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	gid := strings.TrimSpace(body.GroupID)
+	if enrollmentID == "" || gid == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group_id is required"})
+		return
+	}
+	if _, err := a.Store.GetGroup(r.Context(), gid); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "group not found"})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	if err := a.Store.EnsureDevice(r.Context(), enrollmentID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := a.Store.AddGroupMember(r.Context(), gid, enrollmentID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	a.auditAction(r, actionGroupMemberAdd, map[string]any{
+		"group_id": gid, "enrollment_id": enrollmentID,
+	})
+	a.pushManyLater([]string{enrollmentID})
+	ids, err := a.Store.ListGroupsForDevice(r.Context(), enrollmentID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group_ids": ids})
+}
+
+func (a *API) handleRemoveDeviceFromGroup(w http.ResponseWriter, r *http.Request) {
+	enrollmentID := strings.TrimSpace(r.PathValue("id"))
+	gid := strings.TrimSpace(r.PathValue("groupId"))
+	if enrollmentID == "" || gid == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group id is required"})
+		return
+	}
+	if err := a.Store.RemoveGroupMember(r.Context(), gid, enrollmentID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.auditAction(r, actionGroupMemberRemove, map[string]any{
+		"group_id": gid, "enrollment_id": enrollmentID,
+	})
+	a.pushManyLater([]string{enrollmentID})
+	ids, err := a.Store.ListGroupsForDevice(r.Context(), enrollmentID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group_ids": ids})
 }
 
 type createAllowanceBody struct {
@@ -266,17 +331,16 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) reconcileAllowanceTarget(r *http.Request, target policy.Target) string {
-	if a.Push == nil {
-		return ""
+	enqueueErr := ""
+	if a.Push != nil {
+		devices, err := a.devicesForTarget(r, target)
+		if err != nil {
+			enqueueErr = err.Error()
+		} else {
+			a.pushManyLater(devices)
+		}
 	}
-	devices, err := a.devicesForTarget(r, target)
-	if err != nil {
-		return err.Error()
-	}
-	if err := a.Push.ReconcileMany(r.Context(), devices); err != nil {
-		return err.Error()
-	}
-	return ""
+	return enqueueErr
 }
 
 func (a *API) devicesForTarget(r *http.Request, target policy.Target) ([]string, error) {

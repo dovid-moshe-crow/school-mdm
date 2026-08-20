@@ -108,7 +108,7 @@ func (a *API) handleDeletePack(w http.ResponseWriter, r *http.Request) {
 	a.auditAdmin(r, store.ActivityCategoryPolicy, "pack_delete", "נמחקה חבילת רשימה מותרת",
 		map[string]any{"pack_id": id, "devices": len(devices)}, "", "")
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
@@ -144,7 +144,7 @@ func (a *API) handleAddPackItem(w http.ResponseWriter, r *http.Request) {
 	a.auditAdmin(r, store.ActivityCategoryPolicy, "pack_item_add", "נוסף פריט לחבילה",
 		map[string]any{"pack_id": packID, "kind": string(kind), "value": value, "devices": len(devices)}, "", "")
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"ok": "true"})
 }
@@ -161,7 +161,7 @@ func (a *API) handleRemovePackItem(w http.ResponseWriter, r *http.Request) {
 	a.auditAdmin(r, store.ActivityCategoryPolicy, "pack_item_remove", "הוסר פריט מחבילה",
 		map[string]any{"pack_id": packID, "kind": string(kind), "value": value, "devices": len(devices)}, "", "")
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
@@ -214,7 +214,7 @@ func (a *API) handleAddPackAssignment(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"pack_id": packID, "target_type": string(tt), "target_id": tid, "devices": len(devices)},
 		enrollID, groupID)
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"ok": "true"})
 }
@@ -240,7 +240,7 @@ func (a *API) handleRemovePackAssignment(w http.ResponseWriter, r *http.Request)
 		map[string]any{"pack_id": packID, "target_type": string(tt), "target_id": tid, "devices": len(devices)},
 		enrollID, groupID)
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }

@@ -628,6 +628,11 @@ type Store interface {
 	InsertWebhookDelivery(ctx context.Context, d WebhookDelivery) (WebhookDelivery, error)
 	ListWebhookDeliveries(ctx context.Context, endpointID string, limit int) ([]WebhookDelivery, error)
 
+	ListAPITokens(ctx context.Context) ([]APIToken, error)
+	CreateAPIToken(ctx context.Context, tok APIToken) (APIToken, error)
+	DeleteAPIToken(ctx context.Context, id string) error
+	TouchAPIToken(ctx context.Context, rawToken string) (APIToken, error)
+
 	ListPolicyTimers(ctx context.Context) ([]PolicyTimer, error)
 	GetPolicyTimer(ctx context.Context, id string) (PolicyTimer, error)
 	CreatePolicyTimer(ctx context.Context, t PolicyTimer) (PolicyTimer, error)

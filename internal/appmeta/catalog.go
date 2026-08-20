@@ -104,9 +104,15 @@ func (c *Catalog) Search(ctx context.Context, query string, limit int) ([]store.
 			"itunes_ms", itunesMS,
 		)
 		// Soft fallback: if iTunes is down, show whatever we already know locally.
-		if local, lerr := c.Store.SearchAppMeta(ctx, query, limit); lerr == nil && len(local) > 0 {
+		local := SearchKnown(query)
+		if cached, lerr := c.Store.SearchAppMeta(ctx, query, limit); lerr == nil {
+			local = append(local, cached...)
+		}
+		if len(local) > 0 {
 			for i := range local {
-				local[i].Source = "cache"
+				if local[i].Source == "" {
+					local[i].Source = "cache"
+				}
 			}
 			out := rankApps(query, local, limit)
 			c.log().Info("app search fallback to local cache",
@@ -119,8 +125,11 @@ func (c *Catalog) Search(ctx context.Context, query string, limit int) ([]store.
 		}
 		return nil, fmt.Errorf("itunes search: %w", err)
 	}
+	apps = append(SearchKnown(query), apps...)
 	for i := range apps {
-		apps[i].Source = "itunes"
+		if apps[i].Source == "" {
+			apps[i].Source = "itunes"
+		}
 	}
 	out := rankApps(query, apps, limit)
 	c.log().Info("app search ok",
@@ -465,10 +474,23 @@ func rankApps(query string, apps []store.AppMeta, limit int) []store.AppMeta {
 	sort.SliceStable(apps, func(i, j int) bool {
 		return scoreApp(q, apps[i]) > scoreApp(q, apps[j])
 	})
-	if limit > 0 && len(apps) > limit {
-		apps = apps[:limit]
+	seen := map[string]struct{}{}
+	out := make([]store.AppMeta, 0, len(apps))
+	for _, app := range apps {
+		key := policy.AppKey(app.BundleID)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, app)
 	}
-	return apps
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 func scoreApp(q string, app store.AppMeta) int {

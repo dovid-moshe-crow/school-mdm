@@ -47,6 +47,31 @@ export function knownAppName(bundleId?: string): string {
   return knownNames[key] || ''
 }
 
+export function looksLikeBundleId(value: string): boolean {
+  const s = value.trim()
+  return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z0-9.-]+$/.test(s) && !s.includes(' ')
+}
+
+export function knownAppsMatching(query: string): { bundle_id: string; app_name: string; developer: string; source: string }[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+  const out: { bundle_id: string; app_name: string; developer: string; source: string }[] = []
+  for (const [id, name] of Object.entries(knownNames)) {
+    if (id.includes(needle) || name.toLowerCase().includes(needle)) {
+      out.push({ bundle_id: id, app_name: name, developer: 'Apple', source: 'local' })
+    }
+  }
+  if (looksLikeBundleId(query) && !out.some((a) => a.bundle_id.toLowerCase() === needle)) {
+    out.unshift({
+      bundle_id: query.trim(),
+      app_name: knownNames[needle] || query.trim(),
+      developer: '',
+      source: 'local',
+    })
+  }
+  return out
+}
+
 export function appTitle(
   meta?: { app_name?: string; bundle_id?: string } | null,
   bundleId?: string,

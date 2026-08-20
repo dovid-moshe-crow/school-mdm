@@ -141,6 +141,7 @@ export type AbmDepDevice = {
 }
 
 export type AbmDeviceSync = {
+  status?: string
   cursor?: string
   devices?: AbmDepDevice[]
   fetched_until?: string
@@ -150,6 +151,15 @@ export type AbmDeviceSync = {
   assigned?: number
   needed?: number
   assign_error?: string
+}
+
+export type APIToken = {
+  id: string
+  name: string
+  prefix: string
+  created_by?: string
+  created_at: string
+  last_used_at?: string
 }
 
 export type Allowance = {
@@ -687,6 +697,19 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_ids }),
     }).then((r) => json<string[]>(r))
+  },
+  addDeviceGroup(enrollmentId: string, groupId: string) {
+    return req(`/api/devices/${encodeURIComponent(enrollmentId)}/groups`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: groupId }),
+    }).then((r) => json<{ ok: boolean; group_ids: string[] }>(r))
+  },
+  removeDeviceGroup(enrollmentId: string, groupId: string) {
+    return req(
+      `/api/devices/${encodeURIComponent(enrollmentId)}/groups/${encodeURIComponent(groupId)}`,
+      { method: 'DELETE' },
+    ).then((r) => json<{ ok: boolean; group_ids: string[] }>(r))
   },
   allowances(params: URLSearchParams) {
     return req(`/api/allowances?${params}`).then((r) => json<Allowance[]>(r))
@@ -1246,6 +1269,21 @@ export const api = {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<WebhookDelivery>(r))
+  },
+  apiTokens() {
+    return req('/api/admin/tokens').then((r) => json<{ tokens: APIToken[] }>(r))
+  },
+  createAPIToken(name: string) {
+    return req('/api/admin/tokens', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }).then((r) => json<APIToken & { token: string; token_hint?: string }>(r))
+  },
+  deleteAPIToken(id: string) {
+    return req(`/api/admin/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) =>
+      json<{ ok: boolean }>(r),
+    )
   },
 }
 

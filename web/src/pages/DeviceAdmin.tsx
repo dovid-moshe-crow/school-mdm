@@ -7,6 +7,7 @@ import {
   Flex,
   Input,
   List,
+  Select,
   Space,
   Spin,
   Switch,
@@ -57,6 +58,7 @@ export default function DeviceAdmin() {
   const [statusResult, setStatusResult] = useState<MdmCommandResult | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
+  const [groupBusy, setGroupBusy] = useState('')
 
   const mdm = useMdmDeviceActions()
 
@@ -177,6 +179,36 @@ export default function DeviceAdmin() {
     }
   }
 
+  async function addToGroup(groupId: string) {
+    setGroupBusy(groupId)
+    try {
+      await api.addDeviceGroup(deviceId, groupId)
+      message.success(he.ok)
+      void qc.invalidateQueries({ queryKey: ['devices'] })
+      void qc.invalidateQueries({ queryKey: ['groups'] })
+      void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
+    } catch (err) {
+      message.error((err as Error).message)
+    } finally {
+      setGroupBusy('')
+    }
+  }
+
+  async function removeFromGroup(groupId: string) {
+    setGroupBusy(groupId)
+    try {
+      await api.removeDeviceGroup(deviceId, groupId)
+      message.success(he.ok)
+      void qc.invalidateQueries({ queryKey: ['devices'] })
+      void qc.invalidateQueries({ queryKey: ['groups'] })
+      void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
+    } catch (err) {
+      message.error((err as Error).message)
+    } finally {
+      setGroupBusy('')
+    }
+  }
+
   async function revokeRow(row: Allowance) {
     try {
       await api.deleteAllowance(row)
@@ -279,11 +311,45 @@ export default function DeviceAdmin() {
                 {he.lastSeen}: {formatRelativeHe(device.last_seen_at)}
               </Typography.Text>
             ) : null}
+          </Space>
+        </Card>
+
+        <Card size="small" title={he.deviceGroups}>
+          <Space direction="vertical" style={{ width: '100%' }} size="small">
             {groupNames.length ? (
-              <Typography.Text type="secondary">
-                {he.groups}: {groupNames.join(' · ')}
-              </Typography.Text>
-            ) : null}
+              <Flex wrap="wrap" gap={8}>
+                {(device.group_ids || []).map((gid) => {
+                  const name = groups.find((g) => g.id === gid)?.name || gid
+                  return (
+                    <Tag
+                      key={gid}
+                      closable
+                      color="blue"
+                      onClose={(e) => {
+                        e.preventDefault()
+                        void removeFromGroup(gid)
+                      }}
+                    >
+                      {name}
+                    </Tag>
+                  )
+                })}
+              </Flex>
+            ) : (
+              <Typography.Text type="secondary">{he.noDeviceGroups}</Typography.Text>
+            )}
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder={he.addToGroup}
+              value={null}
+              loading={!!groupBusy}
+              style={{ width: '100%', maxWidth: 360 }}
+              options={groups
+                .filter((g) => !(device.group_ids || []).includes(g.id))
+                .map((g) => ({ value: g.id, label: g.name }))}
+              onChange={(gid) => void addToGroup(gid)}
+            />
           </Space>
         </Card>
 

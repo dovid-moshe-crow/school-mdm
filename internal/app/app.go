@@ -206,6 +206,7 @@ func New(ctx context.Context) (*App, error) {
 		Notify:    notifySvc,
 		PortalURL: devicePortalBase,
 		Credits:   creditSvc,
+		AsyncPush: true,
 	}
 	catalog := &appmeta.Catalog{
 		Store:   st,

@@ -72,7 +72,13 @@ func TestApplyAddThenRemove(t *testing.T) {
 		t.Fatalf("want 2 assignments, got %#v", assigns)
 	}
 	if push.n == 0 {
-		t.Fatal("expected reconcile")
+		deadline := time.Now().Add(time.Second)
+		for push.n == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if push.n == 0 {
+			t.Fatal("expected reconcile")
+		}
 	}
 
 	got, err := svc.Get(ctx, created.ID)

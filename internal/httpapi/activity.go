@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,10 +12,18 @@ import (
 )
 
 func (a *API) audit(r *http.Request, e activity.Event) {
+	if r == nil {
+		a.auditCtx(context.Background(), e)
+		return
+	}
+	a.auditCtx(r.Context(), e)
+}
+
+func (a *API) auditCtx(ctx context.Context, e activity.Event) {
 	if a == nil || a.Activity == nil {
 		return
 	}
-	a.Activity.Log(r.Context(), e)
+	a.Activity.Log(ctx, e)
 }
 
 func (a *API) auditAdmin(r *http.Request, category, action, summary string, detail any, enrollmentID, groupID string) {
@@ -33,6 +42,9 @@ func (a *API) auditAdmin(r *http.Request, category, action, summary string, deta
 }
 
 func (a *API) adminActor(r *http.Request) (actorType, actor string) {
+	if u, ok := a.sessionFromRequest(r); ok && strings.TrimSpace(u.Email) != "" {
+		return store.ActivityActorAdmin, u.Email
+	}
 	return store.ActivityActorAdmin, activity.AdminFingerprint(bearerToken(r))
 }
 

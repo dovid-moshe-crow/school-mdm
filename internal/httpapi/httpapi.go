@@ -43,6 +43,8 @@ type API struct {
 	Webhooks *webhooks.Service
 	Timers   *timers.Service
 	Log      *slog.Logger
+	// ForegroundJobs runs MDM/Apple follow-up work inline (tests). Production leaves this false.
+	ForegroundJobs bool
 
 	accessMu    sync.Mutex
 	accessCache map[string]cachedAccessIndex
@@ -72,6 +74,8 @@ func (a *API) Mount(mux *http.ServeMux) {
 	admin("DELETE /api/system-allowlist", a.handleDeleteSystemAllowlist)
 	admin("GET /api/devices", a.handleListDevices)
 	admin("PATCH /api/devices/{id}", a.handleUpdateDevice)
+	admin("POST /api/devices/{id}/groups", a.handleAddDeviceToGroup)
+	admin("DELETE /api/devices/{id}/groups/{groupId}", a.handleRemoveDeviceFromGroup)
 	admin("GET /api/admin/activity", a.handleListActivity)
 	admin("GET /api/packs", a.handleListPacks)
 	admin("POST /api/packs", a.handleCreatePack)
@@ -194,6 +198,10 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mdm/abm/profile", a.requireAdmin(a.handleABMDefineProfile))
 	mux.HandleFunc("POST /api/mdm/abm/assign", a.requireAdmin(a.handleABMAssignProfile))
 
+	admin("GET /api/admin/tokens", a.handleListAPITokens)
+	admin("POST /api/admin/tokens", a.handleCreateAPIToken)
+	admin("DELETE /api/admin/tokens/{id}", a.handleDeleteAPIToken)
+
 	admin("GET /api/webhooks/events", a.handleWebhookEvents)
 	mux.HandleFunc("GET /api/webhooks", a.requireAdmin(a.handleListWebhooks))
 	mux.HandleFunc("POST /api/webhooks", a.requireAdmin(a.handleCreateWebhook))
@@ -257,9 +265,14 @@ func (a *API) handleAppSearch(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	list, err := a.Catalog.Search(r.Context(), q, 25)
 	if err != nil {
-		log.Error("app search handler failed", "q", q, "err", err, "ms", time.Since(start).Milliseconds())
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
+		if known := appmeta.SearchKnown(q); len(known) > 0 {
+			list = known
+			log.Warn("app search using known apps only", "q", q, "err", err)
+		} else {
+			log.Error("app search handler failed", "q", q, "err", err, "ms", time.Since(start).Milliseconds())
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	if list == nil {
 		list = []store.AppMeta{}
@@ -391,11 +404,26 @@ func (a *API) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		Result:       store.ActivityResultOK,
 		Summary:      "נוצרה בקשה חדשה",
 		Detail: map[string]any{
-			"type":  req.Type,
-			"kind":  req.TargetKind,
-			"value": req.Value,
+			"type":   req.Type,
+			"kind":   req.TargetKind,
+			"value":  req.Value,
+			"reason": req.Reason,
+			"status": req.Status,
 		},
 	})
+	if req.Type == store.TypeAccess {
+		a.audit(r, activity.Event{
+			Category:     store.ActivityCategoryCredits,
+			Action:       "access_spend",
+			ActorType:    store.ActivityActorDevice,
+			Actor:        req.EnrollmentID,
+			EnrollmentID: req.EnrollmentID,
+			RequestID:    req.ID,
+			Result:       store.ActivityResultOK,
+			Summary:      "חויבו קרדיטים על בקשת גישה",
+			Detail:       map[string]any{"kind": req.TargetKind, "value": req.Value},
+		})
+	}
 	writeJSON(w, http.StatusCreated, req)
 }
 
@@ -468,6 +496,19 @@ func (a *API) handleAdminPostMessage(w http.ResponseWriter, r *http.Request) {
 		writeDecideErr(w, err)
 		return
 	}
+	req, _ := a.Store.GetRequest(r.Context(), id)
+	actorType, actor := a.adminActor(r)
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryRequests,
+		Action:       "request_message",
+		ActorType:    actorType,
+		Actor:        actor,
+		EnrollmentID: req.EnrollmentID,
+		RequestID:    id,
+		Result:       store.ActivityResultOK,
+		Summary:      "תשובת מנהל לבקשה",
+		Detail:       map[string]any{"author": "admin", "message_id": msg.ID},
+	})
 	writeJSON(w, http.StatusCreated, msg)
 }
 
@@ -479,6 +520,7 @@ func (a *API) handleDevicePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	before, _ := a.Store.GetRequest(r.Context(), id)
 	msg, err := a.Service.PostMessage(r.Context(), approvals.PostMessageInput{
 		RequestID:    id,
 		AuthorRole:   store.AuthorStudent,
@@ -488,6 +530,30 @@ func (a *API) handleDevicePostMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeDecideErr(w, err)
 		return
+	}
+	a.audit(r, activity.Event{
+		Category:     store.ActivityCategoryRequests,
+		Action:       "request_message",
+		ActorType:    store.ActivityActorDevice,
+		Actor:        deviceID,
+		EnrollmentID: deviceID,
+		RequestID:    id,
+		Result:       store.ActivityResultOK,
+		Summary:      "תשובת תלמיד לבקשה",
+		Detail:       map[string]any{"author": "student", "message_id": msg.ID},
+	})
+	if before.ID != "" && before.Status != store.StatusPending {
+		a.audit(r, activity.Event{
+			Category:     store.ActivityCategoryRequests,
+			Action:       "request_reopen",
+			ActorType:    store.ActivityActorDevice,
+			Actor:        deviceID,
+			EnrollmentID: deviceID,
+			RequestID:    id,
+			Result:       store.ActivityResultOK,
+			Summary:      "בקשה נפתחה מחדש אחרי תשובת תלמיד",
+			Detail:       map[string]any{"previous_status": before.Status},
+		})
 	}
 	writeJSON(w, http.StatusCreated, msg)
 }
@@ -515,16 +581,26 @@ func (a *API) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	a.invalidateAccessIndex(req.EnrollmentID)
 	actorType, actor := a.adminActor(r)
+	action := "request_approve"
+	summary := "בקשה אושרה"
+	if req.Status == store.StatusResolved {
+		action = "request_resolve"
+		summary = "בקשה טופלה"
+	}
 	a.audit(r, activity.Event{
 		Category:     store.ActivityCategoryRequests,
-		Action:       "request_approve",
+		Action:       action,
 		ActorType:    actorType,
 		Actor:        actor,
 		EnrollmentID: req.EnrollmentID,
 		RequestID:    req.ID,
 		Result:       store.ActivityResultOK,
-		Summary:      "בקשה אושרה",
-		Detail:       map[string]any{"scope": body.Scope, "duration": body.Duration, "group_id": body.GroupID},
+		Summary:      summary,
+		Detail: map[string]any{
+			"type": req.Type, "kind": req.TargetKind, "value": req.Value,
+			"scope": body.Scope, "duration": body.Duration, "group_id": body.GroupID,
+			"status": req.Status,
+		},
 	})
 	writeJSON(w, http.StatusOK, req)
 }
@@ -550,7 +626,21 @@ func (a *API) handleDeny(w http.ResponseWriter, r *http.Request) {
 		RequestID:    req.ID,
 		Result:       store.ActivityResultOK,
 		Summary:      "בקשה נדחתה",
+		Detail:       map[string]any{"type": req.Type, "kind": req.TargetKind, "value": req.Value},
 	})
+	if req.Type == store.TypeAccess {
+		a.audit(r, activity.Event{
+			Category:     store.ActivityCategoryCredits,
+			Action:       "access_refund",
+			ActorType:    actorType,
+			Actor:        actor,
+			EnrollmentID: req.EnrollmentID,
+			RequestID:    req.ID,
+			Result:       store.ActivityResultOK,
+			Summary:      "הוחזרו קרדיטים אחרי דחיית בקשה",
+			Detail:       map[string]any{"value": req.Value},
+		})
+	}
 	writeJSON(w, http.StatusOK, req)
 }
 

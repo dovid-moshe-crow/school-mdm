@@ -143,7 +143,7 @@ func (a *API) handleReplaceProfilePayload(w http.ResponseWriter, r *http.Request
 	a.auditAdmin(r, store.ActivityCategoryPolicy, "profile_replace", "הוחלף קובץ פרופיל מותאם",
 		map[string]any{"profile_id": p.ID, "payload_identifier": p.PayloadIdentifier, "devices": len(devices)}, "", "")
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, p)
 }
@@ -198,7 +198,7 @@ func (a *API) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
 	a.auditAdmin(r, store.ActivityCategoryPolicy, "profile_delete", "נמחק פרופיל מותאם",
 		map[string]any{"profile_id": id, "payload_identifier": p.PayloadIdentifier, "devices": len(devices)}, "", "")
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
@@ -255,7 +255,7 @@ func (a *API) handleAddProfileAssignment(w http.ResponseWriter, r *http.Request)
 		map[string]any{"profile_id": profileID, "target_type": string(tt), "target_id": tid, "devices": len(devices)},
 		enrollID, groupID)
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"ok": "true"})
 }
@@ -281,7 +281,7 @@ func (a *API) handleRemoveProfileAssignment(w http.ResponseWriter, r *http.Reque
 		map[string]any{"profile_id": profileID, "target_type": string(tt), "target_id": tid, "devices": len(devices)},
 		enrollID, groupID)
 	if a.Push != nil && len(devices) > 0 {
-		_ = a.Push.ReconcileMany(r.Context(), devices)
+		a.pushManyLater(devices)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }

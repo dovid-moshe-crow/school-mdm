@@ -31,13 +31,28 @@ func (a *API) authorizedAdmin(r *http.Request) bool {
 	if _, ok := a.sessionFromRequest(r); ok {
 		return true
 	}
-	if tok := bearerToken(r); tok != "" && a.Cfg.ValidAdminToken(tok) {
+	if tok := bearerToken(r); a.validBearer(r, tok) {
 		return true
 	}
-	if _, pass, ok := r.BasicAuth(); ok && a.Cfg.ValidAdminToken(pass) {
+	if _, pass, ok := r.BasicAuth(); ok && a.validBearer(r, pass) {
 		return true
 	}
 	return false
+}
+
+func (a *API) validBearer(r *http.Request, tok string) bool {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return false
+	}
+	if a.Cfg.ValidAdminToken(tok) {
+		return true
+	}
+	if a.Store == nil {
+		return false
+	}
+	_, err := a.Store.TouchAPIToken(r.Context(), tok)
+	return err == nil
 }
 
 func bearerToken(r *http.Request) string {
