@@ -18,12 +18,13 @@ import { useQuery } from '@tanstack/react-query'
 import type { Dayjs } from 'dayjs'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, getAdminToken, type ActivityEvent } from '../api'
+import { api, type ActivityEvent } from '../api'
 import { ListSearchBar } from '../components/ListSearch'
 import { he } from '../he'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { deviceLabel, deviceOptions, searchableSelect } from '../labels'
 import { formatAbsoluteHe, formatRelativeHe } from '../time'
+import { AppIdentity } from '../appMeta'
 import { useDebounced } from '../ui'
 
 const categoryOptions = [
@@ -73,7 +74,7 @@ export default function AdminLogs() {
   const devicesQuery = useQuery({
     queryKey: ['devices'],
     queryFn: () => api.devices(),
-    enabled: !!getAdminToken(),
+    enabled: true,
   })
 
   const filter = useMemo(
@@ -95,7 +96,7 @@ export default function AdminLogs() {
   const logsQuery = useQuery({
     queryKey: ['admin-activity', filter],
     queryFn: () => api.adminActivity(filter),
-    enabled: !!getAdminToken(),
+    enabled: true,
     refetchInterval: 15_000,
   })
 
@@ -326,6 +327,21 @@ export default function AdminLogs() {
               <Typography.Text type="secondary">
                 {he.activityCommandId}: {selected.command_uuid}
               </Typography.Text>
+            ) : null}
+            {selected.detail?.kind === 'app' && typeof selected.detail?.value === 'string' ? (
+              <AppIdentity
+                bundleId={String(selected.detail.value)}
+                meta={
+                  typeof selected.detail.app_name === 'string'
+                    ? {
+                        bundle_id: String(selected.detail.value),
+                        app_name: String(selected.detail.app_name),
+                        developer: '',
+                      }
+                    : undefined
+                }
+                size={40}
+              />
             ) : null}
             <Typography.Paragraph>
               <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0 }}>

@@ -63,7 +63,7 @@ Do not invent URLs. Use only the endpoints below (or refresh from OpenAPI). Do n
 ## Hebrew overview (for the operator)
 
 זהו ממשק REST של ניהול בית הספר. כל פעולה שקיימת במסך הניהול זמינה גם ב־API.
-אימות: כותרת \`Authorization: Bearer <אסימון ניהול>\` (אותו אסימון כמו במסך הגדרות).
+אימות: התחברות Google בממשק, או כותרת \`Authorization: Bearer <אסימון ניהול>\` לסקריפטים.
 מסמכים אינטראקטיביים: ${origin}/api-docs
 מפרט OpenAPI: ${origin}/api/openapi.json
 וובהוקים: כל אירוע פעילות נשלח ב־POST JSON עם חתימת HMAC.
@@ -74,10 +74,9 @@ ${origin}
 
 ## Auth
 
-- Header: \`Authorization: Bearer <ADMIN_TOKENS>\`
+- Header: \`Authorization: Bearer <ADMIN_TOKENS>\` **or** a Google admin session cookie
 - Or HTTP Basic with the token as the password
-- Some school/portal routes are unauthenticated (student device pages). Anything the admin panel treats as MDM / activity / webhooks / purchases requires the Bearer token.
-- The token is stored in the admin UI (Settings). Never hard-code a guessed token. Ask the operator if it is missing.
+- Student portal routes are unauthenticated and scoped by enrollment id. Admin panel / MDM / activity / webhooks / purchases require auth.
 
 ## Discovery
 
@@ -92,7 +91,7 @@ ${origin}
 - MDM command POSTs usually return \`202 { "status": "queued" }\` and sometimes \`command_uuid\` to poll.
 - Poll command results: \`GET /api/mdm/devices/{id}/commands/{commandUUID}\`
 - Prefer idempotent reads before destructive MDM actions (lock/erase/lost mode).
-- After allowlist/group/pack changes the server reconciles policy to devices.
+- After allowlist/group/pack/custom-profile changes the server reconciles policy to devices.
 
 ## Quick examples
 

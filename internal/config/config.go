@@ -13,6 +13,13 @@ type Config struct {
 	DatabaseURL   string
 	AdminTokens   []string
 	PortalBaseURL string
+
+	// Google OAuth for the admin UI. Empty client id disables Sign in with Google.
+	GoogleClientID     string
+	GoogleClientSecret string
+	AdminEmails        []string
+	AdminGoogleDomain  string
+	SessionSecret      string
 	// ItunesCountry is the App Store storefront (default il).
 	ItunesCountry string
 	// ItunesLang is optional; only en_us / ja_jp are valid. Leave empty for IL storefront.
@@ -47,6 +54,11 @@ func Load() (Config, error) {
 		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		AdminTokens:        splitCSV(getenv("ADMIN_TOKENS", "dev-admin-token")),
 		PortalBaseURL:      strings.TrimRight(getenv("PORTAL_BASE_URL", "http://localhost:8080"), "/"),
+		GoogleClientID:     strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
+		GoogleClientSecret: strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET")),
+		AdminEmails:        splitCSV(os.Getenv("ADMIN_EMAILS")),
+		AdminGoogleDomain:  strings.ToLower(strings.TrimSpace(os.Getenv("ADMIN_GOOGLE_HOSTED_DOMAIN"))),
+		SessionSecret:      strings.TrimSpace(os.Getenv("SESSION_SECRET")),
 		ItunesCountry:      getenv("ITUNES_COUNTRY", "il"),
 		ItunesLang:         strings.TrimSpace(os.Getenv("ITUNES_LANG")),
 		NedarimMode:        strings.ToLower(getenv("NEDARIM_MODE", "fake")),
@@ -140,8 +152,36 @@ func splitCSV(s string) []string {
 
 // ValidAdminToken reports whether token is configured.
 func (c Config) ValidAdminToken(token string) bool {
+	if token == "" {
+		return false
+	}
 	for _, t := range c.AdminTokens {
 		if t == token {
+			return true
+		}
+	}
+	return false
+}
+
+// GoogleEnabled reports whether Sign in with Google is configured.
+func (c Config) GoogleEnabled() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
+}
+
+// AllowAdminEmail reports whether this Google account may use the admin UI.
+func (c Config) AllowAdminEmail(email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false
+	}
+	if c.AdminGoogleDomain != "" && !strings.HasSuffix(email, "@"+c.AdminGoogleDomain) {
+		return false
+	}
+	if len(c.AdminEmails) == 0 {
+		return c.AdminGoogleDomain != ""
+	}
+	for _, e := range c.AdminEmails {
+		if strings.ToLower(strings.TrimSpace(e)) == email {
 			return true
 		}
 	}

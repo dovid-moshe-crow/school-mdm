@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/go-kit/log v0.2.1
+	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/micromdm/nanodep v0.7.0
@@ -11,13 +12,14 @@ require (
 	github.com/micromdm/nanomdm v0.9.0
 	github.com/micromdm/plist v0.2.2
 	github.com/micromdm/scep/v2 v2.3.0
+	golang.org/x/oauth2 v0.28.0
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/go-kit/kit v0.4.0 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/go-stack/stack v1.6.0 // indirect
-	github.com/golang-jwt/jwt/v5 v5.0.0 // indirect
 	github.com/gomodule/oauth1 v0.2.0 // indirect
 	github.com/gorilla/context v0.0.0-20160226214623-1ea25387ff6f // indirect
 	github.com/gorilla/mux v1.4.0 // indirect

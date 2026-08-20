@@ -23,7 +23,7 @@ type NameSource interface {
 
 // Service wraps Apple Business Manager / DEP API calls.
 type Service struct {
-	store Store
+	store  Store
 	client *godep.Client
 	names  NameSource
 	// fallback used only if names is nil (tests).
@@ -118,6 +118,51 @@ func (s *Service) SyncDevices(ctx context.Context) (*godep.FetchDeviceResponseJs
 	last.Devices = all
 	last.MoreToFollow = false
 	return last, nil
+}
+
+// SerialsNeedingProfile returns serials that do not yet have this enrollment
+// profile assigned or pushed (empty, removed, or a different profile).
+func SerialsNeedingProfile(devices []godep.DeviceJson, profileUUID string) []string {
+	profileUUID = strings.TrimSpace(profileUUID)
+	if profileUUID == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, d := range devices {
+		serial := strings.TrimSpace(d.SerialNumber)
+		if serial == "" {
+			continue
+		}
+		if _, ok := seen[serial]; ok {
+			continue
+		}
+		if hasEnrollmentProfile(d, profileUUID) {
+			continue
+		}
+		seen[serial] = struct{}{}
+		out = append(out, serial)
+	}
+	return out
+}
+
+func hasEnrollmentProfile(d godep.DeviceJson, profileUUID string) bool {
+	current := ""
+	if d.ProfileUuid != nil {
+		current = strings.TrimSpace(*d.ProfileUuid)
+	}
+	if !strings.EqualFold(current, profileUUID) {
+		return false
+	}
+	if d.ProfileStatus == nil {
+		return false
+	}
+	switch *d.ProfileStatus {
+	case godep.DeviceJsonProfileStatusAssigned, godep.DeviceJsonProfileStatusPushed:
+		return true
+	default:
+		return false
+	}
 }
 
 // GetProfile fetches a DEP profile by UUID.

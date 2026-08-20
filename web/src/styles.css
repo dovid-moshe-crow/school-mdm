@@ -6,8 +6,76 @@ body,
 }
 
 /* Device admin page */
-.device-admin-page {
-  max-width: 720px;
+.app-identity {
+  min-width: 0;
+}
+
+.app-identity-hit {
+  display: block;
+  min-width: 0;
+}
+
+.app-thumb {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #d9e7e1;
+  contain: strict;
+}
+
+.app-thumb-img {
+  display: block;
+  object-fit: cover;
+}
+
+.app-thumb-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0b6e4f;
+  font-weight: 600;
+  background: #d9e7e1;
+}
+
+.virtual-list {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
+
+.virtual-list-row {
+  box-sizing: border-box;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.virtual-list-row-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 100%;
+  min-height: 52px;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.virtual-list-row-inner .app-identity-hit,
+.virtual-list-row-inner .app-identity {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-identity.is-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.app-identity-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .device-admin-topbar {
@@ -1041,8 +1109,9 @@ body {
   text-align: left;
 }
 
-@media (max-width: 640px) {
-  .api-docs-hero {
-    padding: 20px 16px;
+  .timer-weekdays {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin: 4px 0 8px;
   }
-}

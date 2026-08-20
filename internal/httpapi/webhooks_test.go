@@ -24,6 +24,12 @@ func TestOpenAPIIncludesAdminAndWebhooks(t *testing.T) {
 	if _, ok := paths["/api/webhooks"]; !ok {
 		t.Fatal("missing webhooks path")
 	}
+	if _, ok := paths["/api/auth/google/start"]; !ok {
+		t.Fatal("missing google start path")
+	}
+	if _, ok := paths["/api/timers"]; !ok {
+		t.Fatal("missing timers path")
+	}
 	wh := paths["/api/webhooks"].(map[string]any)
 	post := wh["post"].(map[string]any)
 	sec, _ := post["security"].([]map[string]any)

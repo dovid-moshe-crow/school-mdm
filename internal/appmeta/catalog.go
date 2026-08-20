@@ -10,8 +10,10 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
@@ -175,8 +177,11 @@ func (c *Catalog) lookupBundleOpt(ctx context.Context, bundleID string, refresh 
 			// Prefer cache when we already have rich details.
 			if meta.Description != "" || meta.Genre != "" {
 				meta.Source = "cache"
-				return meta, nil
+				return overlayKnown(meta), nil
 			}
+		}
+		if known, ok := Known(bundleID); ok {
+			return known, nil
 		}
 	}
 
@@ -184,13 +189,115 @@ func (c *Catalog) lookupBundleOpt(ctx context.Context, bundleID string, refresh 
 	if err != nil {
 		if cached, cerr := c.Store.GetAppMeta(ctx, bundleID); cerr == nil {
 			cached.Source = "cache"
-			return cached, nil
+			return overlayKnown(cached), nil
+		}
+		if known, ok := Known(bundleID); ok {
+			return known, nil
 		}
 		return store.AppMeta{}, err
 	}
 	meta.Source = "itunes"
 	_ = c.Store.UpsertAppMeta(ctx, meta)
-	return meta, nil
+	return overlayKnown(meta), nil
+}
+
+func overlayKnown(meta store.AppMeta) store.AppMeta {
+	known, ok := Known(meta.BundleID)
+	if !ok {
+		return meta
+	}
+	if strings.TrimSpace(meta.Name) == "" {
+		meta.Name = known.Name
+	}
+	return meta
+}
+
+// Resolve returns the best display metadata without failing: cache, well-known
+// system apps, then optional iTunes. Name is never empty (falls back to the bundle id).
+func (c *Catalog) Resolve(ctx context.Context, bundleID string, remote bool) store.AppMeta {
+	bundleID = strings.TrimSpace(bundleID)
+	if bundleID == "" {
+		return store.AppMeta{}
+	}
+	if c != nil && c.Store != nil {
+		if meta, err := c.Store.GetAppMeta(ctx, bundleID); err == nil {
+			meta = overlayKnown(meta)
+			if strings.TrimSpace(meta.Name) != "" {
+				if !remote || meta.ArtworkURL != "" || meta.Source == "local" {
+					if meta.Source == "" {
+						meta.Source = "cache"
+					}
+					return meta
+				}
+			}
+		}
+	}
+	if known, ok := Known(bundleID); ok && !remote {
+		return known
+	}
+	if remote && c != nil {
+		if meta, err := c.LookupBundle(ctx, bundleID); err == nil {
+			return overlayKnown(meta)
+		}
+	}
+	if known, ok := Known(bundleID); ok {
+		return known
+	}
+	return store.AppMeta{BundleID: bundleID, Name: bundleID, Source: "unknown"}
+}
+
+// LookupMany resolves many bundle IDs. When remote is true, App Store misses are
+// fetched (capped) so admin lists can show icons and titles.
+func (c *Catalog) LookupMany(ctx context.Context, ids []string, remote bool) []store.AppMeta {
+	seen := map[string]int{}
+	slots := make([]store.AppMeta, 0, len(ids))
+	var missing []string
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		key := policy.AppKey(id)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		m := c.Resolve(ctx, id, false)
+		seen[key] = len(slots)
+		slots = append(slots, m)
+		if remote && m.Source != "local" && (m.Source == "unknown" || m.ArtworkURL == "") {
+			missing = append(missing, m.BundleID)
+		}
+	}
+	if remote && len(missing) > 0 && c != nil {
+		if len(missing) > 25 {
+			missing = missing[:25]
+		}
+		ch := make(chan store.AppMeta, len(missing))
+		sem := make(chan struct{}, 6)
+		var wg sync.WaitGroup
+		for _, id := range missing {
+			wg.Add(1)
+			go func(bundleID string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				ch <- c.Resolve(ctx, bundleID, true)
+			}(id)
+		}
+		go func() {
+			wg.Wait()
+			close(ch)
+		}()
+		for meta := range ch {
+			if meta.BundleID == "" {
+				continue
+			}
+			if i, ok := seen[policy.AppKey(meta.BundleID)]; ok {
+				slots[i] = meta
+			}
+		}
+	}
+	return slots
 }
 
 type itunesResponse struct {

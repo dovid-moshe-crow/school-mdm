@@ -9,7 +9,6 @@ import {
   WalletOutlined,
 } from '@ant-design/icons'
 import {
-  Alert,
   App,
   Badge,
   Button,
@@ -33,6 +32,7 @@ import {
   Tabs,
   Tag,
   Typography,
+  Upload,
 } from 'antd'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -45,8 +45,6 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import {
   api,
-  getAdminToken,
-  setAdminToken,
   type Allowance,
   type AllotmentInterval,
   type AllotmentTargetType,
@@ -58,6 +56,7 @@ import {
   type Group,
   type Request,
   type WhitelistPack,
+  type CustomProfile,
 } from '../api'
 import { AppSearchPicker } from '../components/AppSearchPicker'
 import { DevicePickList } from '../components/CheckablePickList'
@@ -65,7 +64,9 @@ import { DeviceActionModals } from '../components/DeviceActionModals'
 import { DeviceMdmActions } from '../components/DeviceMdmActions'
 import { ListSearchBar, SearchableCollection, SearchableEmpty } from '../components/ListSearch'
 import { PackEditor } from '../components/PackEditor'
+import { ProfileEditor } from '../components/ProfileEditor'
 import { RequestThread } from '../components/RequestThread'
+import { AdminTimers } from './AdminTimers'
 import { useListSearch } from '../hooks/useListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
@@ -77,13 +78,18 @@ import {
   groupOptions,
   groupSearchText,
   packSearchText,
+  profileSearchText,
   searchableSelect,
 } from '../labels'
 import { formatRelativeHe } from '../time'
 import AdminCreditPurchases from './AdminCreditPurchases'
 import AdminEnrollment from './AdminEnrollment'
 import AdminLogs from './AdminLogs'
-import { AppThumb, useDebounced } from '../ui'
+import { AppIdentity } from '../appMeta'
+import { SystemAllowlistSettings } from '../components/SystemAllowlistSettings'
+import { appTitle } from '../knownApps'
+import { useDebounced } from '../ui'
+import { useAdminAuth } from '../auth'
 
 const tabKeys = ['requests', 'devices', 'whitelists', 'groups', 'credits', 'logs', 'enrollment', 'settings'] as const
 type TabKey = (typeof tabKeys)[number]
@@ -95,6 +101,7 @@ const EMPTY_GROUPS: Group[] = []
 const EMPTY_DEVICES: Device[] = []
 const EMPTY_ALLOWANCES: Allowance[] = []
 const EMPTY_PACKS: WhitelistPack[] = []
+const EMPTY_PROFILES: CustomProfile[] = []
 
 function sameIds(a: string[], b: string[]) {
   if (a.length !== b.length) return false
@@ -128,6 +135,7 @@ function sourceLabel(src: string) {
   if (src === 'group') return he.sourceGroup
   if (src === 'device') return he.sourceDevice
   if (src === 'grant') return he.sourceGrant
+  if (src === 'pack') return he.sourcePack
   return src
 }
 
@@ -136,8 +144,9 @@ function whyLine(row: Allowance, groups: Group[], devices: Device[]) {
   if (row.source === 'essential') return src
   if (row.group_id) {
     const g = groups.find((x) => x.id === row.group_id)
-    return `${src}${g ? ` · ${g.name}` : ''}`
+    return `${src}${g ? ` · ${g.name}` : ''}${row.pack_name ? ` · ${row.pack_name}` : ''}`
   }
+  if (row.pack_name) return `${src} · ${row.pack_name}`
   if (row.enrollment_id) return `${src} · ${labelDevice(row.enrollment_id, devices)}`
   if (row.expires_at) {
     try {
@@ -183,6 +192,7 @@ export default function Admin() {
   const { message, modal } = App.useApp()
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const auth = useAdminAuth()
   const mdm = useMdmDeviceActions()
 
   const [tab, setTab] = useQueryState(
@@ -251,7 +261,6 @@ export default function Admin() {
   const [allotEnabled, setAllotEnabled] = useState(true)
   const [savingAllot, setSavingAllot] = useState(false)
   const [runningAllot, setRunningAllot] = useState(false)
-  const [adminTokenDraft, setAdminTokenDraft] = useState(() => getAdminToken())
   const [lostModeOpen, setLostModeOpen] = useState(false)
   const [eraseOpen, setEraseOpen] = useState(false)
   const [deviceDrawerId, setDeviceDrawerId] = useState('')
@@ -262,9 +271,10 @@ export default function Admin() {
   const [lockScreenFootnoteDraft, setLockScreenFootnoteDraft] = useState('מכשיר בית ספר · KFilter')
   const [whitelistMode, setWhitelistMode] = useQueryState(
     'wmode',
-    parseAsStringLiteral(['packs', 'oneoffs'] as const).withDefault('packs'),
+    parseAsStringLiteral(['packs', 'profiles', 'oneoffs', 'timers'] as const).withDefault('packs'),
   )
   const [selectedPackId, setSelectedPackId] = useState('')
+  const [selectedProfileId, setSelectedProfileId] = useState('')
   const [newPackName, setNewPackName] = useState('')
 
   const devicesQuery = useQuery({
@@ -280,10 +290,20 @@ export default function Admin() {
     queryFn: () => api.packs(),
     enabled: tab === 'whitelists',
   })
+  const profilesQuery = useQuery({
+    queryKey: ['profiles'],
+    queryFn: () => api.profiles(),
+    enabled: tab === 'whitelists',
+  })
   const packDetailQuery = useQuery({
     queryKey: ['pack', selectedPackId],
     queryFn: () => api.getPack(selectedPackId),
     enabled: tab === 'whitelists' && whitelistMode === 'packs' && !!selectedPackId,
+  })
+  const profileDetailQuery = useQuery({
+    queryKey: ['profile', selectedProfileId],
+    queryFn: () => api.getProfile(selectedProfileId),
+    enabled: tab === 'whitelists' && whitelistMode === 'profiles' && !!selectedProfileId,
   })
   const creditSettingsQuery = useQuery({
     queryKey: ['admin-credit-settings'],
@@ -306,9 +326,9 @@ export default function Admin() {
     enabled: tab === 'credits' && !!giftDevice,
   })
   const abmSettingsQuery = useQuery({
-    queryKey: ['abm-settings', getAdminToken()],
+    queryKey: ['abm-settings'],
     queryFn: () => api.abmSettings(),
-    enabled: tab === 'settings' && !!getAdminToken(),
+    enabled: tab === 'settings',
     retry: false,
   })
   useEffect(() => {
@@ -320,10 +340,12 @@ export default function Admin() {
   const devices = devicesQuery.data ?? EMPTY_DEVICES
   const groups = groupsQuery.data ?? EMPTY_GROUPS
   const packs = packsQuery.data ?? EMPTY_PACKS
+  const profiles = profilesQuery.data ?? EMPTY_PROFILES
   const drawerDevice = devices.find((d) => d.enrollment_id === deviceDrawerId)
   const devicesSearch = useListSearch(devices, deviceSearchText)
   const groupsSearch = useListSearch(groups, groupSearchText)
   const packsSearch = useListSearch(packs, packSearchText)
+  const profilesSearch = useListSearch(profiles, profileSearchText)
 
   async function runBulk(op: string, extra?: { group_id?: string; message?: string }) {
     if (!selectedIds.length) return
@@ -553,6 +575,7 @@ export default function Admin() {
   const visibleDevices = devicesSearch.visible
   const visibleGroups = groupsSearch.visible
   const visiblePacks = packsSearch.visible
+  const visibleProfiles = profilesSearch.visible
 
   const isMobile = useIsMobile()
 
@@ -633,8 +656,6 @@ export default function Admin() {
   const showQueue = !isMobile || !selectedReqId
   const showTicket = !isMobile || !!selectedReqId
 
-  const adminTokenPresent = !!getAdminToken()
-
   const mobileNavItems: { key: TabKey; label: string; icon: ReactNode }[] = [
     { key: 'requests', label: he.tabRequests, icon: <InboxOutlined /> },
     { key: 'groups', label: he.tabGroups, icon: <TeamOutlined /> },
@@ -649,37 +670,28 @@ export default function Admin() {
   return (
     <div className={isMobile ? 'page-shell wide admin-mobile-shell' : 'page-shell wide'}>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <div>
-          <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
-            {he.admin}
-          </Typography.Title>
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            {he.adminLead}
-          </Typography.Paragraph>
-        </div>
-
-        {!adminTokenPresent ? (
-          <Alert
-            type="warning"
-            showIcon
-            message={he.mdmAdminTokenMissing}
-            description={he.mdmAdminTokenHint}
-            action={
-              <Button
-                size="small"
-                type="primary"
-                onClick={() => {
-                  setAdminToken('dev-admin-token')
-                  setAdminTokenDraft('dev-admin-token')
-                  message.success(he.mdmSaveToken)
-                  void qc.invalidateQueries()
-                }}
-              >
-                {he.mdmUseDefaultToken}
-              </Button>
-            }
-          />
-        ) : null}
+        <Flex justify="space-between" align="start" gap={12} wrap="wrap">
+          <div>
+            <Typography.Title level={2} className="page-title" style={{ marginBottom: 8 }}>
+              {he.admin}
+            </Typography.Title>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              {he.adminLead}
+            </Typography.Paragraph>
+          </div>
+          <Space>
+            {auth.user?.email && auth.user.email !== 'api-token' ? (
+              <Typography.Text type="secondary">{auth.user.email}</Typography.Text>
+            ) : null}
+            <Button
+              onClick={() => {
+                void auth.logout().then(() => navigate('/admin'))
+              }}
+            >
+              {he.adminLogout}
+            </Button>
+          </Space>
+        </Flex>
 
         <Tabs
           className={isMobile ? 'admin-tabs admin-tabs-mobile' : 'admin-tabs'}
@@ -787,20 +799,20 @@ export default function Admin() {
                                       }}
                                     >
                                       <List.Item.Meta
-                                        avatar={
-                                          r.type === 'access' && r.kind === 'app' ? (
-                                            <AppThumb
-                                              name={r.app?.app_name || r.value}
-                                              url={r.app?.artwork_url}
-                                              size={36}
-                                            />
-                                          ) : undefined
-                                        }
                                         title={
                                           <Flex justify="space-between" gap={8} align="center">
-                                            <Typography.Text ellipsis style={{ flex: 1, minWidth: 0 }}>
-                                              {r.app?.app_name || r.value}
-                                            </Typography.Text>
+                                            {r.type === 'access' && r.kind === 'app' ? (
+                                              <AppIdentity
+                                                bundleId={r.value}
+                                                meta={r.app}
+                                                size={32}
+                                                compact
+                                              />
+                                            ) : (
+                                              <Typography.Text ellipsis style={{ flex: 1, minWidth: 0 }}>
+                                                {r.value}
+                                              </Typography.Text>
+                                            )}
                                             <Tag color={nextTagColor(next.kind, r.status)}>
                                               {next.label}
                                             </Tag>
@@ -856,26 +868,35 @@ export default function Admin() {
                                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                                   <Flex justify="space-between" gap={12} align="start" wrap="wrap">
                                     <Flex gap={10} align="center" style={{ minWidth: 0, flex: 1 }}>
-                                      {r.type === 'access' && r.kind === 'app' && (
-                                        <AppThumb
-                                          name={r.app?.app_name || r.value}
-                                          url={r.app?.artwork_url}
+                                      {r.type === 'access' && r.kind === 'app' ? (
+                                        <AppIdentity
+                                          bundleId={r.value}
+                                          meta={r.app}
                                           size={40}
+                                          extra={
+                                            <div>
+                                              <Typography.Text type="secondary">
+                                                {labelDevice(r.enrollment_id, devices)}
+                                                {sub && ` · ${sub}`}
+                                                {' · '}
+                                                {he.typeLabel[r.type] || r.type}
+                                              </Typography.Text>
+                                            </div>
+                                          }
                                         />
-                                      )}
-                                      <div style={{ minWidth: 0 }}>
-                                        <Typography.Text strong>
-                                          {r.app?.app_name || r.value}
-                                        </Typography.Text>
-                                        <div>
-                                          <Typography.Text type="secondary">
-                                            {labelDevice(r.enrollment_id, devices)}
-                                            {sub && ` · ${sub}`}
-                                            {' · '}
-                                            {he.typeLabel[r.type] || r.type}
-                                          </Typography.Text>
+                                      ) : (
+                                        <div style={{ minWidth: 0 }}>
+                                          <Typography.Text strong>{r.value}</Typography.Text>
+                                          <div>
+                                            <Typography.Text type="secondary">
+                                              {labelDevice(r.enrollment_id, devices)}
+                                              {sub && ` · ${sub}`}
+                                              {' · '}
+                                              {he.typeLabel[r.type] || r.type}
+                                            </Typography.Text>
+                                          </div>
                                         </div>
-                                      </div>
+                                      )}
                                     </Flex>
                                     <Tag color={nextTagColor(next.kind, r.status)}>{next.label}</Tag>
                                   </Flex>
@@ -1248,9 +1269,11 @@ export default function Admin() {
                   <Segmented
                     block
                     value={whitelistMode}
-                    onChange={(v) => setWhitelistMode(v as 'packs' | 'oneoffs')}
+                    onChange={(v) => setWhitelistMode(v as 'packs' | 'profiles' | 'oneoffs' | 'timers')}
                     options={[
                       { value: 'packs', label: he.packsTab },
+                      { value: 'profiles', label: he.profilesTab },
+                      { value: 'timers', label: he.timersTab },
                       { value: 'oneoffs', label: he.oneOffsTab },
                     ]}
                   />
@@ -1360,6 +1383,114 @@ export default function Admin() {
                         ) : null}
                       </Drawer>
                     </Space>
+                  ) : whitelistMode === 'profiles' ? (
+                    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                        {he.profilesLead}
+                      </Typography.Paragraph>
+                      <Card size="small">
+                        <Upload.Dragger
+                          accept=".mobileconfig,.plist"
+                          maxCount={1}
+                          showUploadList={false}
+                          beforeUpload={async (file) => {
+                            try {
+                              const p = await api.createProfile(file)
+                              setSelectedProfileId(p.id)
+                              message.success(he.ok)
+                              void qc.invalidateQueries({ queryKey: ['profiles'] })
+                            } catch (err) {
+                              message.error((err as Error).message)
+                            }
+                            return false
+                          }}
+                        >
+                          <p className="ant-upload-drag-icon">
+                            <InboxOutlined />
+                          </p>
+                          <p className="ant-upload-text">{he.profileUpload}</p>
+                          <p className="ant-upload-hint">{he.profileUploadHint}</p>
+                        </Upload.Dragger>
+                      </Card>
+                      <ListSearchBar
+                        placeholder={he.searchProfiles}
+                        value={profilesSearch.query}
+                        onChange={profilesSearch.setQuery}
+                        total={profilesSearch.total}
+                        shown={visibleProfiles.length}
+                      />
+                      {profilesQuery.isLoading ? <LoadingBlock /> : null}
+                      {!profilesQuery.isLoading ? (
+                        <SearchableEmpty
+                          total={profiles.length}
+                          shown={visibleProfiles.length}
+                          emptyText={he.emptyProfiles}
+                        />
+                      ) : null}
+                      <List
+                        dataSource={visibleProfiles}
+                        renderItem={(p) => (
+                          <List.Item
+                            actions={[
+                              <Button
+                                key="open"
+                                type="link"
+                                onClick={() => setSelectedProfileId(p.id)}
+                              >
+                                {he.openProfile}
+                              </Button>,
+                              <Button
+                                key="del"
+                                type="link"
+                                danger
+                                onClick={() => {
+                                  modal.confirm({
+                                    title: he.profileDeleteConfirm,
+                                    okText: he.delete,
+                                    okType: 'danger',
+                                    onOk: async () => {
+                                      await api.deleteProfile(p.id)
+                                      if (selectedProfileId === p.id) setSelectedProfileId('')
+                                      message.success(he.ok)
+                                      void qc.invalidateQueries({ queryKey: ['profiles'] })
+                                    },
+                                  })
+                                }}
+                              >
+                                {he.delete}
+                              </Button>,
+                            ]}
+                          >
+                            <List.Item.Meta
+                              title={p.name}
+                              description={`${p.payload_identifier} · ${p.assignment_count ?? 0} · ${p.description || ''}`}
+                            />
+                          </List.Item>
+                        )}
+                      />
+                      <Drawer
+                        open={!!selectedProfileId}
+                        onClose={() => setSelectedProfileId('')}
+                        title={profileDetailQuery.data?.profile.name || he.profilesTab}
+                        width={isMobile ? '100%' : 520}
+                        placement={isMobile ? 'bottom' : 'right'}
+                        height={isMobile ? '92%' : undefined}
+                      >
+                        {profileDetailQuery.isLoading ? <LoadingBlock /> : null}
+                        {profileDetailQuery.data ? (
+                          <ProfileEditor
+                            key={selectedProfileId}
+                            profileId={selectedProfileId}
+                            profile={profileDetailQuery.data.profile}
+                            assignments={profileDetailQuery.data.assignments}
+                            groups={groups}
+                            devices={devices}
+                          />
+                        ) : null}
+                      </Drawer>
+                    </Space>
+                  ) : whitelistMode === 'timers' ? (
+                    <AdminTimers devices={devices} groups={groups} packs={packs} profiles={profiles} />
                   ) : (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   <Card size="small">
@@ -1504,21 +1635,18 @@ export default function Admin() {
                           <Flex gap={12} align="start" justify="space-between" wrap="wrap">
                             <Flex gap={12} align="start" style={{ minWidth: 0, flex: 1 }}>
                               {row.kind === 'app' && (
-                                <AppThumb
-                                  name={row.app?.app_name || row.value}
-                                  url={row.app?.artwork_url}
-                                />
+                                <AppIdentity bundleId={row.value} meta={row.app} size={40} />
                               )}
                               <div style={{ minWidth: 0 }}>
                                 <Space size={4} wrap>
                                   <Tag>{row.kind === 'app' ? 'אפליקציה' : 'אתר'}</Tag>
                                   <Tag>{sourceLabel(row.source)}</Tag>
                                 </Space>
-                                <div>
-                                  <Typography.Text strong>
-                                    {row.app?.app_name || row.value}
-                                  </Typography.Text>
-                                </div>
+                                {row.kind !== 'app' ? (
+                                  <div>
+                                    <Typography.Text strong>{row.value}</Typography.Text>
+                                  </div>
+                                ) : null}
                                 <Typography.Text type="secondary">
                                   {whyLine(row, groups, devices)}
                                 </Typography.Text>
@@ -1538,7 +1666,7 @@ export default function Admin() {
                                 onClick={() => {
                                   modal.confirm({
                                     title: he.revokeConfirm,
-                                    content: row.app?.app_name || row.value,
+                                    content: appTitle(row.app, row.value),
                                     onOk: async () => {
                                       try {
                                         await api.deleteAllowance(row)
@@ -2589,29 +2717,13 @@ export default function Admin() {
               label: he.tabSettings,
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                    {he.mdmAdminTokenHint}
-                  </Typography.Paragraph>
-                  <Card size="small" title={he.mdmAdminToken}>
-                    <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+                  <Card size="small" title={he.adminSignedInAs}>
+                    <Typography.Paragraph style={{ marginBottom: 8 }}>
+                      {auth.user?.email || he.adminLoginToken}
+                    </Typography.Paragraph>
+                    <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
                       {he.mdmAdminTokenHint}
                     </Typography.Paragraph>
-                    <Space.Compact style={{ width: '100%' }}>
-                      <Input.Password
-                        value={adminTokenDraft}
-                        onChange={(e) => setAdminTokenDraft(e.target.value)}
-                        placeholder="dev-admin-token"
-                      />
-                      <Button
-                        type="primary"
-                        onClick={() => {
-                          setAdminToken(adminTokenDraft.trim())
-                          message.success(he.mdmSaveToken)
-                        }}
-                      >
-                        {he.mdmSaveToken}
-                      </Button>
-                    </Space.Compact>
                   </Card>
                   <Card
                     size="small"
@@ -2626,6 +2738,7 @@ export default function Admin() {
                       {he.apiDocsSettingsLead}
                     </Typography.Paragraph>
                   </Card>
+                  <SystemAllowlistSettings />
                   <Card size="small" title={he.lockScreenTitle}>
                     <Space direction="vertical" style={{ width: '100%' }} size="middle">
                       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>

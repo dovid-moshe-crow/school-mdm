@@ -14,6 +14,8 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { he } from '../he'
 import { matchesQuery } from '../search'
 import { ListSearchBar } from './ListSearch'
+import { VirtualList } from './VirtualList'
+import { AppIdentity } from '../appMeta'
 
 export function formatMdmQueryValue(key: string, value: unknown): string {
   if (value == null) return '—'
@@ -211,44 +213,43 @@ export function MdmCommandResultView({ result }: { result: MdmCommandResult }) {
             style={{ marginBottom: 8 }}
           />
         ) : null}
-        <List
-          className="mdm-result-list"
-          size="small"
-          bordered={!isMobile}
-          style={{ maxHeight: scrollMax, overflow: 'auto' }}
-          dataSource={filtered}
-          locale={{ emptyText: he.emptyAllow }}
-          renderItem={(app) => (
-            <List.Item className="mdm-result-list-item">
-              <div className="mdm-result-list-body">
-                <Flex justify="space-between" align="flex-start" gap={8} wrap="wrap">
-                  <Typography.Text strong className="mdm-result-list-title">
-                    {String(app.Name || app.Identifier || '—')}
-                  </Typography.Text>
-                  {app.HasUpdateAvailable ? (
-                    <Tag color="orange" style={{ marginInlineEnd: 0 }}>
-                      {he.mdmUpdateAvailable}
-                    </Tag>
-                  ) : null}
-                </Flex>
-                <Typography.Text
-                  type="secondary"
-                  className="mdm-result-list-sub"
-                  copyable={
-                    app.Identifier
-                      ? { text: String(app.Identifier), tooltips: false }
-                      : false
+        {filtered.length ? (
+          <VirtualList
+            items={filtered}
+            rowHeight={56}
+            height={isMobile ? 360 : 420}
+            itemKey={(app, i) => String(app.Identifier || i)}
+            renderRow={(app) => (
+              <div className="virtual-list-row-inner">
+                <AppIdentity
+                  bundleId={String(app.Identifier || '')}
+                  meta={
+                    app.Name
+                      ? {
+                          bundle_id: String(app.Identifier || ''),
+                          app_name: String(app.Name),
+                          developer: '',
+                        }
+                      : undefined
                   }
-                >
-                  {String(app.Identifier || '—')}
-                </Typography.Text>
-                <Typography.Text type="secondary" className="mdm-result-list-sub">
-                  {he.mdmAppVersion}: {String(app.ShortVersion || app.Version || '—')}
-                </Typography.Text>
+                  size={32}
+                  compact
+                />
+                {app.HasUpdateAvailable ? (
+                  <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                    {he.mdmUpdateAvailable}
+                  </Tag>
+                ) : (
+                  <Typography.Text type="secondary" className="mdm-result-list-sub">
+                    {String(app.ShortVersion || app.Version || '')}
+                  </Typography.Text>
+                )}
               </div>
-            </List.Item>
-          )}
-        />
+            )}
+          />
+        ) : (
+          <Typography.Text type="secondary">{he.emptyAllow}</Typography.Text>
+        )}
       </div>
     )
   }

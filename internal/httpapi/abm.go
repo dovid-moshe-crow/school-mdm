@@ -10,6 +10,7 @@ import (
 
 	"github.com/micromdm/nanodep/godep"
 
+	"github.com/dwdmsh/school-mdm/internal/abm"
 	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
@@ -111,14 +112,14 @@ func (a *API) handleABMSettingsPut(w http.ResponseWriter, r *http.Request) {
 		ActorType: actorType, Actor: actor,
 		Result: store.ActivityResultOK, Summary: "עודכנו הגדרות ABM/KFilter",
 		Detail: map[string]any{
-			"dep_name":              updated.DepName,
-			"dep_profile_uuid":      updated.DEPProfileUUID,
-			"companion_itunes_id":   updated.CompanionITunesID,
-			"companion_bundle_id":   updated.CompanionBundleID,
-			"companion_enabled":     updated.CompanionEnabled,
-			"lock_screen_enabled":   updated.LockScreenEnabled,
-			"lock_screen_footnote":  updated.LockScreenFootnote,
-			"lock_screen_repushed":  lockChanged,
+			"dep_name":             updated.DepName,
+			"dep_profile_uuid":     updated.DEPProfileUUID,
+			"companion_itunes_id":  updated.CompanionITunesID,
+			"companion_bundle_id":  updated.CompanionBundleID,
+			"companion_enabled":    updated.CompanionEnabled,
+			"lock_screen_enabled":  updated.LockScreenEnabled,
+			"lock_screen_footnote": updated.LockScreenFootnote,
+			"lock_screen_repushed": lockChanged,
 		},
 	})
 	writeJSON(w, http.StatusOK, updated)
@@ -250,6 +251,34 @@ func (a *API) handleABMSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	profileUUID := ""
+	if settings, sErr := a.Store.GetMDMSettings(r.Context()); sErr == nil {
+		profileUUID = strings.TrimSpace(settings.DEPProfileUUID)
+	}
+	need := abm.SerialsNeedingProfile(devices.Devices, profileUUID)
+	assigned := 0
+	assignErr := ""
+	const assignBatch = 1000
+	for i := 0; i < len(need); i += assignBatch {
+		end := i + assignBatch
+		if end > len(need) {
+			end = len(need)
+		}
+		if _, err := a.ABM.AssignProfile(r.Context(), profileUUID, need[i:end]); err != nil {
+			assignErr = err.Error()
+			a.auditAdmin(r, store.ActivityCategoryABM, "abm_assign", "שיוך פרופיל הרשמה אחרי סנכרון נכשל",
+				map[string]any{"profile_uuid": profileUUID, "devices": len(need), "assigned": assigned, "error": assignErr}, "", "")
+			break
+		}
+		assigned += end - i
+	}
+	if assigned > 0 {
+		a.auditAdmin(r, store.ActivityCategoryABM, "abm_assign", "שויך פרופיל הרשמה למכשירים בלי פרופיל",
+			map[string]any{"profile_uuid": profileUUID, "devices": assigned}, "", "")
+		if refreshed, rErr := a.ABM.SyncDevices(r.Context()); rErr == nil {
+			devices = refreshed
+		}
+	}
 	raw, err := json.Marshal(devices.Devices)
 	if err != nil {
 		writeErr(w, err)
@@ -261,15 +290,21 @@ func (a *API) handleABMSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.auditAdmin(r, store.ActivityCategoryABM, "abm_sync", "סונכרנו מכשירים מ-Apple",
-		map[string]any{"devices": len(devices.Devices)}, "", "")
-	writeJSON(w, http.StatusOK, map[string]any{
+		map[string]any{"devices": len(devices.Devices), "assigned": assigned, "needed": len(need)}, "", "")
+	out := map[string]any{
 		"devices":        devices.Devices,
 		"cursor":         devices.Cursor,
 		"fetched_until":  devices.FetchedUntil,
 		"more_to_follow": devices.MoreToFollow,
 		"synced_at":      cache.SyncedAt,
 		"cached":         false,
-	})
+		"assigned":       assigned,
+		"needed":         len(need),
+	}
+	if assignErr != "" {
+		out["assign_error"] = assignErr
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *API) handleABMListDevices(w http.ResponseWriter, r *http.Request) {

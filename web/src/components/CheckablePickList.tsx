@@ -1,4 +1,4 @@
-import { MobileOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, FileProtectOutlined, MobileOutlined, TeamOutlined } from '@ant-design/icons'
 import { Button, Checkbox, Empty, Flex, Segmented, Space, Tag, Typography } from 'antd'
 import { useMemo, useState, type ReactNode } from 'react'
 import { he } from '../he'
@@ -237,6 +237,116 @@ export function DevicePickList({
         on: he.pickFilterInGroup,
         off: he.pickFilterOutGroup,
       }}
+    />
+  )
+}
+
+export function GroupPickList({
+  groups,
+  selectedKeys,
+  onChange,
+  placeholder,
+}: {
+  groups: Array<{ id: string; name: string; description?: string; member_count?: number }>
+  selectedKeys: string[]
+  onChange: (keys: string[]) => void
+  placeholder?: string
+}) {
+  const items: CheckablePickItem[] = groups.map((g) => ({
+    key: g.id,
+    title: g.name,
+    searchText: [g.name, g.description, g.id].filter(Boolean).join(' '),
+    description: (
+      <Typography.Text type="secondary" className="pick-list-desc-text">
+        {[g.description, g.member_count != null ? `${g.member_count}` : '']
+          .filter(Boolean)
+          .join(' · ')}
+      </Typography.Text>
+    ),
+    avatar: <TeamOutlined />,
+  }))
+  return (
+    <CheckablePickList
+      items={items}
+      selectedKeys={selectedKeys}
+      onChange={onChange}
+      placeholder={placeholder || he.searchGroups}
+      emptyText={he.emptyGroups}
+      maxHeight={280}
+    />
+  )
+}
+
+export function PackPickList({
+  packs,
+  selectedKeys,
+  onChange,
+  placeholder,
+}: {
+  packs: Array<{ id: string; name: string; description?: string; item_count?: number }>
+  selectedKeys: string[]
+  onChange: (keys: string[]) => void
+  placeholder?: string
+}) {
+  const items: CheckablePickItem[] = packs.map((p) => ({
+    key: p.id,
+    title: p.name,
+    searchText: [p.name, p.description, p.id].filter(Boolean).join(' '),
+    description: (
+      <Typography.Text type="secondary" className="pick-list-desc-text">
+        {[`${p.item_count ?? 0}`, p.description].filter(Boolean).join(' · ')}
+      </Typography.Text>
+    ),
+    avatar: <AppstoreOutlined />,
+  }))
+  return (
+    <CheckablePickList
+      items={items}
+      selectedKeys={selectedKeys}
+      onChange={onChange}
+      placeholder={placeholder || he.searchPacks}
+      emptyText={he.emptyPacks}
+      maxHeight={280}
+    />
+  )
+}
+
+export function ProfilePickList({
+  profiles,
+  selectedKeys,
+  onChange,
+  placeholder,
+}: {
+  profiles: Array<{
+    id: string
+    name: string
+    description?: string
+    payload_identifier?: string
+    assignment_count?: number
+  }>
+  selectedKeys: string[]
+  onChange: (keys: string[]) => void
+  placeholder?: string
+}) {
+  const items: CheckablePickItem[] = profiles.map((p) => ({
+    key: p.id,
+    title: p.name,
+    searchText: [p.name, p.description, p.payload_identifier, p.id].filter(Boolean).join(' '),
+    description: (
+      <Typography.Text type="secondary" className="pick-list-desc-text">
+        {[p.payload_identifier, p.description].filter(Boolean).join(' · ')}
+      </Typography.Text>
+    ),
+    avatar: <FileProtectOutlined />,
+  }))
+  return (
+    <CheckablePickList
+      items={items}
+      selectedKeys={selectedKeys}
+      onChange={onChange}
+      placeholder={placeholder || he.searchProfiles}
+      emptyText={he.emptyProfiles}
+      maxHeight={280}
     />
   )
 }

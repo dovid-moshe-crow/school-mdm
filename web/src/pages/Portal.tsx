@@ -33,6 +33,8 @@ import { RequestThread } from '../components/RequestThread'
 import { ListSearchBar, SearchableCollection } from '../components/ListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he, studentNextAction } from '../he'
+import { AppIdentity, useAppMetaStore } from '../appMeta'
+import { appTitle } from '../knownApps'
 import { AppThumb, normalizeHostPreview, useDebounced } from '../ui'
 
 const categories = ['access-url', 'access-app', 'general', 'bug'] as const
@@ -43,11 +45,11 @@ const portalModes = ['store', 'request', 'updates'] as const
 const EMPTY_APPS: AppMeta[] = []
 
 function appMetaSearchText(app: AppMeta) {
-  return `${app.app_name} ${app.developer} ${app.bundle_id}`
+  return `${appTitle(app, app.bundle_id)} ${app.developer} ${app.bundle_id}`
 }
 
 function requestSearchText(r: Request) {
-  return `${r.app?.app_name || ''} ${r.value} ${r.reason} ${r.status} ${r.type} ${r.last_message?.body || ''}`
+  return `${appTitle(r.app, r.value)} ${r.value} ${r.reason} ${r.status} ${r.type} ${r.last_message?.body || ''}`
 }
 type PortalMode = (typeof portalModes)[number]
 
@@ -473,26 +475,16 @@ export default function Portal() {
     enabled: mode === 'store' && !!deviceId,
   })
 
-  const allowedAppsQuery = useQuery({
-    queryKey: ['store-allowed-apps', deviceId, allowlistQuery.data?.apps],
-    queryFn: async () => {
-      const bundles = (allowlistQuery.data?.apps || []).filter(
-        (b) => b && !b.startsWith('com.apple.'),
-      )
-      const out: AppMeta[] = []
-      for (const bundle of bundles.slice(0, 40)) {
-        try {
-          const meta = await api.lookupApp(bundle, { enrollmentID: deviceId })
-          out.push({ ...meta, access_status: 'allowed' })
-        } catch {
-          /* skip unknown bundles */
-        }
-      }
-      out.sort((a, b) => a.app_name.localeCompare(b.app_name, 'he'))
-      return out
-    },
-    enabled: mode === 'store' && !!deviceId && !!allowlistQuery.data,
-  })
+  const { get: getAppMeta } = useAppMetaStore()
+  const allowedApps = useMemo(() => {
+    const bundles = allowlistQuery.data?.apps || []
+    if (!bundles.length) return EMPTY_APPS
+    return bundles.map((bundle_id) => ({
+      bundle_id,
+      app_name: appTitle(undefined, bundle_id),
+      developer: '',
+    }))
+  }, [allowlistQuery.data?.apps])
 
   const detailsQuery = useQuery({
     queryKey: ['app-lookup', bundleId, deviceId],
@@ -660,6 +652,7 @@ export default function Portal() {
   }
 
   function renderStoreApp(item: AppMeta) {
+    const meta = getAppMeta(item.bundle_id, item) || item
     return (
       <List.Item
         key={item.bundle_id}
@@ -667,23 +660,22 @@ export default function Portal() {
         actions={[
           <StoreAppActions
             key="act"
-            app={item}
-            onRequest={() => void goRequestApp(item)}
+            app={{ ...meta, access_status: 'allowed' }}
+            onRequest={() => void goRequestApp({ ...meta, access_status: 'allowed' })}
             onOpenPending={() => void goUpdatesForPending()}
           />,
         ]}
       >
         <List.Item.Meta
-          avatar={<AppThumb name={item.app_name} url={item.artwork_url} />}
-          title={item.app_name}
+          title={<AppIdentity bundleId={item.bundle_id} meta={meta} size={40} />}
           description={
             <Space direction="vertical" size={2}>
-              {item.developer ? (
+              {meta.developer ? (
                 <Typography.Text type="secondary">
-                  {he.by} {item.developer}
+                  {he.by} {meta.developer}
                 </Typography.Text>
               ) : null}
-              {statusTag(item.access_status)}
+              {statusTag('allowed')}
             </Space>
           }
         />
@@ -757,12 +749,12 @@ export default function Portal() {
             </Typography.Paragraph>
 
             <Card size="small" title={he.storeAllowed}>
-              {allowlistQuery.isLoading || allowedAppsQuery.isLoading ? (
+              {allowlistQuery.isLoading ? (
                 <Skeleton active paragraph={{ rows: 2 }} />
               ) : (
                 <SearchableCollection
-                  items={allowedAppsQuery.data ?? EMPTY_APPS}
-                  text={appMetaSearchText}
+                  items={allowedApps}
+                  text={(app) => appMetaSearchText(getAppMeta(app.bundle_id, app) || app)}
                   emptyText={he.storeEmptyAllowed}
                 >
                   {(apps) => (
@@ -1033,14 +1025,11 @@ export default function Portal() {
                       }
                       title={
                         <Flex gap={10} align="center" className="card-title-wrap">
-                          {r.type === 'access' && r.kind === 'app' && (
-                            <AppThumb
-                              name={r.app?.app_name || r.value}
-                              url={r.app?.artwork_url}
-                              size={32}
-                            />
+                          {r.type === 'access' && r.kind === 'app' ? (
+                            <AppIdentity bundleId={r.value} meta={r.app} size={32} compact />
+                          ) : (
+                            <span>{r.value}</span>
                           )}
-                          <span>{r.app?.app_name || r.value}</span>
                           {isNew ? <Tag color="blue">{he.updatesBadgeNew}</Tag> : null}
                         </Flex>
                       }

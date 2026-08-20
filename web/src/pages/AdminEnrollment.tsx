@@ -17,7 +17,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, getAdminToken, type AbmDepDevice } from '../api'
+import { api, type AbmDepDevice } from '../api'
 import { ListSearchBar, SearchableEmpty } from '../components/ListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he } from '../he'
@@ -30,7 +30,6 @@ export default function AdminEnrollment() {
   const isMobile = useIsMobile()
   const [busy, setBusy] = useState('')
   const [abmProfileUUID, setAbmProfileUUID] = useState('')
-  const [selectedSerials, setSelectedSerials] = useState<string[]>([])
   const [abmDepNameDraft, setAbmDepNameDraft] = useState('nanok')
   const [companionItunesDraft, setCompanionItunesDraft] = useState('')
   const [companionBundleDraft, setCompanionBundleDraft] = useState('com.kfilter.portal')
@@ -41,37 +40,37 @@ export default function AdminEnrollment() {
   const mdmStatusQuery = useQuery({
     queryKey: ['mdm-status'],
     queryFn: () => api.mdmStatus(),
-    enabled: !!getAdminToken(),
+    enabled: true,
   })
   const abmSettingsQuery = useQuery({
-    queryKey: ['abm-settings', getAdminToken()],
+    queryKey: ['abm-settings'],
     queryFn: () => api.abmSettings(),
-    enabled: !!getAdminToken(),
+    enabled: true,
     retry: false,
   })
   const abmNamesQuery = useQuery({
-    queryKey: ['abm-names', getAdminToken()],
+    queryKey: ['abm-names'],
     queryFn: () => api.abmDepNames(),
-    enabled: !!getAdminToken(),
+    enabled: true,
     retry: false,
   })
   const abmAccountQuery = useQuery({
-    queryKey: ['abm-account', getAdminToken()],
+    queryKey: ['abm-account'],
     queryFn: () => api.abmAccount(),
-    enabled: !!getAdminToken(),
+    enabled: true,
     retry: false,
   })
   const abmDevicesQuery = useQuery({
-    queryKey: ['abm-devices', getAdminToken()],
+    queryKey: ['abm-devices'],
     queryFn: () => api.abmDevices(),
-    enabled: !!getAdminToken(),
+    enabled: true,
     retry: false,
     staleTime: 60_000,
   })
 
   // When Apple is connected and the local cache is empty, sync once automatically.
   useEffect(() => {
-    if (!abmAccountQuery.isSuccess || !getAdminToken()) return
+    if (!abmAccountQuery.isSuccess) return
     if (autoSyncedRef.current) return
     if (abmDevicesQuery.isLoading) return
     const cached = abmDevicesQuery.data?.devices ?? []
@@ -86,7 +85,7 @@ export default function AdminEnrollment() {
       try {
         const data = await api.abmSync()
         if (cancelled) return
-        qc.setQueryData(['abm-devices', getAdminToken()], data)
+        qc.setQueryData(['abm-devices'], data)
       } catch {
         // Keep empty cache UI; user can press Sync manually.
       } finally {
@@ -136,35 +135,21 @@ export default function AdminEnrollment() {
     setBusy('abm-sync')
     try {
       const data = await api.abmSync()
-      qc.setQueryData(['abm-devices', getAdminToken()], data)
-      setSelectedSerials((prev) =>
-        prev.filter((s) => (data.devices ?? []).some((d) => d.serial_number === s)),
-      )
-      message.success(`${he.ok} — ${data.devices?.length ?? 0} ${he.abmDevicesCount}`)
-    } catch (err) {
-      message.error((err as Error).message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  async function assignSerials(serials: string[]) {
-    const profileUUID = abmProfileUUID.trim()
-    const unique = [...new Set(serials.map((s) => s.trim()).filter(Boolean))]
-    if (!profileUUID) {
-      message.warning(he.abmAssignNeedProfile)
-      return
-    }
-    if (!unique.length) {
-      message.warning(he.abmAssignNeedDevices)
-      return
-    }
-    setBusy('abm-assign')
-    try {
-      await api.abmAssign(profileUUID, unique)
-      message.success(he.ok)
-      setSelectedSerials([])
-      await syncDevices()
+      qc.setQueryData(['abm-devices'], data)
+      const n = data.devices?.length ?? 0
+      const assigned = data.assigned ?? 0
+      if (data.assign_error) {
+        message.error(data.assign_error)
+      } else if (!abmProfileUUID.trim()) {
+        message.success(`${he.ok} — ${n} ${he.abmDevicesCount}`)
+        if (n > 0) message.warning(he.abmAssignNeedProfile)
+      } else if (assigned > 0) {
+        message.success(
+          he.abmSyncAssigned.replace('{n}', String(n)).replace('{m}', String(assigned)),
+        )
+      } else {
+        message.success(he.abmSyncNoneAssigned.replace('{n}', String(n)))
+      }
     } catch (err) {
       message.error((err as Error).message)
     } finally {
@@ -211,26 +196,8 @@ export default function AdminEnrollment() {
         width: 140,
         render: (v?: string) => (v ? formatRelativeHe(v) : '—'),
       },
-      {
-        title: he.abmColAction,
-        key: 'action',
-        width: 110,
-        render: (_: unknown, row) => (
-          <Button
-            size="small"
-            type="link"
-            disabled={!abmProfileUUID.trim()}
-            loading={busy === 'abm-assign'}
-            onClick={() => void assignSerials([row.serial_number])}
-          >
-            {he.abmAssignOne}
-          </Button>
-        ),
-      },
     ],
-    // assignSerials closes over latest profile/busy via handlers defined each render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [abmProfileUUID, busy],
+    [],
   )
 
   const enrollUrl = mdmStatusQuery.data?.public_url
@@ -470,14 +437,6 @@ export default function AdminEnrollment() {
             </Typography.Paragraph>
             <Space direction="vertical" style={{ width: '100%' }} size="small">
               <div>
-                <Typography.Text type="secondary">{he.abmSyncHint}</Typography.Text>
-                <div style={{ marginTop: 6 }}>
-                  <Button size="small" block={isMobile} loading={busy === 'abm-sync'} onClick={() => void syncDevices()}>
-                    {he.abmSync}
-                  </Button>
-                </div>
-              </div>
-              <div>
                 <Typography.Text type="secondary">{he.abmDefineProfileHint}</Typography.Text>
                 {abmProfileUUID ? (
                   <div style={{ marginTop: 4 }}>
@@ -517,7 +476,7 @@ export default function AdminEnrollment() {
                   </Button>
                 </div>
               </div>
-              <Typography.Text type="secondary">{he.abmAssignHint}</Typography.Text>
+              <Typography.Text type="secondary">{he.abmSyncHint}</Typography.Text>
               <Typography.Text type="secondary">{he.abmAfterAssign}</Typography.Text>
             </Space>
           </Card>
@@ -534,22 +493,15 @@ export default function AdminEnrollment() {
                       {he.abmDevicesLastSync}: {formatRelativeHe(abmDevicesQuery.data.synced_at)}
                     </Typography.Text>
                   ) : null}
-                  <Button size="small" loading={busy === 'abm-sync'} onClick={() => void syncDevices()}>
+                  <Button size="small" type="primary" loading={busy === 'abm-sync'} onClick={() => void syncDevices()}>
                     {he.abmSync}
-                  </Button>
-                  <Button
-                    size="small"
-                    type="primary"
-                    disabled={!abmProfileUUID.trim() || selectedSerials.length === 0}
-                    loading={busy === 'abm-assign'}
-                    onClick={() => void assignSerials(selectedSerials)}
-                  >
-                    {he.abmAssignSelected}
-                    {selectedSerials.length ? ` (${selectedSerials.length})` : ''}
                   </Button>
                 </Space>
               }
             >
+              <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+                {he.abmSyncHint}
+              </Typography.Paragraph>
               {abmDevicesQuery.isLoading && !abmDepDevices.length ? (
                 <Skeleton active paragraph={{ rows: 3 }} />
               ) : abmDevicesQuery.isFetching && !abmDepDevices.length && busy === 'abm-sync' ? (
@@ -577,10 +529,6 @@ export default function AdminEnrollment() {
                   rowKey="serial_number"
                   columns={abmDeviceColumns}
                   dataSource={visibleAbmDevices}
-                  rowSelection={{
-                    selectedRowKeys: selectedSerials,
-                    onChange: (keys) => setSelectedSerials(keys.map(String)),
-                  }}
                   pagination={{ pageSize: 10, hideOnSinglePage: true }}
                   scroll={{ x: 820 }}
                 />

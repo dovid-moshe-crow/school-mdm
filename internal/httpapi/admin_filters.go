@@ -8,14 +8,15 @@ import (
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/activity"
+	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
 type requestRow struct {
 	store.Request
-	App          *store.AppMeta       `json:"app,omitempty"`
-	MessageCount int                  `json:"message_count,omitempty"`
+	App          *store.AppMeta        `json:"app,omitempty"`
+	MessageCount int                   `json:"message_count,omitempty"`
 	LastMessage  *store.RequestMessage `json:"last_message,omitempty"`
 }
 
@@ -36,11 +37,13 @@ func (a *API) enrichRequest(r *http.Request, req store.Request) requestRow {
 type allowanceRow struct {
 	Kind         string         `json:"kind"`
 	Value        string         `json:"value"`
-	Source       string         `json:"source"` // essential | global | group | device | grant
+	Source       string         `json:"source"` // essential | global | group | device | grant | pack
 	TargetType   string         `json:"target_type,omitempty"`
 	TargetID     string         `json:"target_id,omitempty"`
 	EnrollmentID string         `json:"enrollment_id,omitempty"`
 	GroupID      string         `json:"group_id,omitempty"`
+	PackID       string         `json:"pack_id,omitempty"`
+	PackName     string         `json:"pack_name,omitempty"`
 	ExpiresAt    *time.Time     `json:"expires_at,omitempty"`
 	App          *store.AppMeta `json:"app,omitempty"`
 }
@@ -169,7 +172,11 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		apps, urls := policy.Effective(base, grants, groups, device, now)
+		sys := a.enabledSystemKeys(r)
 		for _, v := range apps {
+			if _, hide := sys[policy.AppKey(v)]; hide {
+				continue
+			}
 			src, tid, gid := sourceFor(policy.KindApp, v, device, groups, base, grants, now)
 			rows = append(rows, allowanceRow{
 				Kind: "app", Value: v, Source: src, TargetType: tid, TargetID: gid,
@@ -185,6 +192,12 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 				ExpiresAt: grantExpiry(policy.KindURL, v, device, groups, grants, now),
 			})
 		}
+		packRows, err := a.packAllowanceRows(r, device, groups)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		rows = append(rows, packRows...)
 
 	case "all":
 		for _, e := range policy.Essentials {
@@ -232,7 +245,7 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 	filtered := make([]allowanceRow, 0, len(rows))
 	seen := map[string]struct{}{}
 	for _, row := range rows {
-		key := row.Kind + "|" + row.Value + "|" + row.Source + "|" + row.TargetType + "|" + row.TargetID + "|" + row.EnrollmentID
+		key := row.Kind + "|" + row.Value + "|" + row.Source + "|" + row.TargetType + "|" + row.TargetID + "|" + row.EnrollmentID + "|" + row.PackID
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -240,7 +253,7 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if q != "" {
-			blob := strings.ToLower(row.Value + " " + row.EnrollmentID + " " + row.GroupID + " " + row.Source + " " + row.TargetType)
+			blob := strings.ToLower(row.Value + " " + row.EnrollmentID + " " + row.GroupID + " " + row.Source + " " + row.TargetType + " " + row.PackName)
 			if !strings.Contains(blob, q) {
 				if row.Kind == "app" {
 					if meta := a.lookupAppMeta(r, row.Value); meta != nil {
@@ -253,7 +266,7 @@ func (a *API) handleListAllowances(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		seen[key] = struct{}{}
-		if row.Kind == "app" {
+		if row.Kind == "app" && scope != "device" && scope != "effective" {
 			row.App = a.lookupAppMeta(r, row.Value)
 		}
 		filtered = append(filtered, row)
@@ -386,15 +399,39 @@ func (a *API) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) lookupAppMeta(r *http.Request, bundleID string) *store.AppMeta {
-	if meta, err := a.Store.GetAppMeta(r.Context(), bundleID); err == nil {
-		return &meta
+	bundleID = strings.TrimSpace(bundleID)
+	if bundleID == "" {
+		return nil
 	}
 	if a.Catalog != nil {
-		if meta, err := a.Catalog.LookupBundle(r.Context(), bundleID); err == nil {
+		m := a.Catalog.Resolve(r.Context(), bundleID, false)
+		if m.BundleID == "" {
+			m.BundleID = bundleID
+		}
+		if strings.TrimSpace(m.Name) == "" {
+			m.Name = bundleID
+		}
+		return &m
+	}
+	if a.Store != nil {
+		if meta, err := a.Store.GetAppMeta(r.Context(), bundleID); err == nil {
 			return &meta
 		}
 	}
+	if meta, ok := appmeta.Known(bundleID); ok {
+		return &meta
+	}
 	return nil
+}
+
+func (a *API) appDisplayName(r *http.Request, kind policy.Kind, value string) string {
+	if kind != policy.KindApp {
+		return value
+	}
+	if meta := a.lookupAppMeta(r, value); meta != nil && strings.TrimSpace(meta.Name) != "" {
+		return meta.Name
+	}
+	return value
 }
 
 func matchRequestStatus(got store.RequestStatus, want string) bool {
@@ -466,6 +503,85 @@ func groupIDIf(src, id string) string {
 		return id
 	}
 	return ""
+}
+
+func (a *API) packAllowanceRows(r *http.Request, device string, groups []string) ([]allowanceRow, error) {
+	if a.Store == nil {
+		return nil, nil
+	}
+	packs, err := a.Store.ListWhitelistPacks(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	groupSet := map[string]struct{}{}
+	for _, g := range groups {
+		if g != "" {
+			groupSet[g] = struct{}{}
+		}
+	}
+	var rows []allowanceRow
+	for _, p := range packs {
+		assigns, err := a.Store.ListWhitelistPackAssignments(r.Context(), p.ID)
+		if err != nil {
+			return nil, err
+		}
+		var applied []store.WhitelistPackAssignment
+		for _, as := range assigns {
+			switch as.TargetType {
+			case policy.TargetGlobal:
+				applied = append(applied, as)
+			case policy.TargetDevice:
+				if as.TargetID == device {
+					applied = append(applied, as)
+				}
+			case policy.TargetGroup:
+				if _, ok := groupSet[as.TargetID]; ok {
+					applied = append(applied, as)
+				}
+			}
+		}
+		if len(applied) == 0 {
+			continue
+		}
+		items, err := a.Store.ListWhitelistPackItems(r.Context(), p.ID)
+		if err != nil {
+			return nil, err
+		}
+		as := preferredPackAssignment(applied)
+		for _, it := range items {
+			row := allowanceRow{
+				Kind:       string(it.Kind),
+				Value:      it.Value,
+				Source:     "pack",
+				TargetType: string(as.TargetType),
+				TargetID:   as.TargetID,
+				PackID:     p.ID,
+				PackName:   p.Name,
+			}
+			if as.TargetType == policy.TargetGroup {
+				row.GroupID = as.TargetID
+			}
+			if as.TargetType == policy.TargetDevice {
+				row.EnrollmentID = device
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func preferredPackAssignment(as []store.WhitelistPackAssignment) store.WhitelistPackAssignment {
+	for _, a := range as {
+		if a.TargetType == policy.TargetGroup {
+			return a
+		}
+	}
+	for _, a := range as {
+		if a.TargetType == policy.TargetDevice {
+			return a
+		}
+	}
+	return as[0]
 }
 
 // sourceFor returns source label, target type, and related id (group or device).

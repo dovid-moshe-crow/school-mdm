@@ -44,3 +44,24 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("CreditsAccessCost=%d", cfg.CreditsAccessCost)
 	}
 }
+
+func TestAllowAdminEmail(t *testing.T) {
+	onlyList := Config{AdminEmails: []string{"Ada@School.com"}}
+	if !onlyList.AllowAdminEmail("ada@school.com") {
+		t.Fatal("list should match")
+	}
+	if onlyList.AllowAdminEmail("other@school.com") {
+		t.Fatal("unknown email")
+	}
+	domain := Config{AdminGoogleDomain: "school.com"}
+	if !domain.AllowAdminEmail("ada@school.com") {
+		t.Fatal("domain should match")
+	}
+	if domain.AllowAdminEmail("ada@gmail.com") {
+		t.Fatal("wrong domain")
+	}
+	empty := Config{}
+	if empty.AllowAdminEmail("ada@school.com") {
+		t.Fatal("fail closed with no allowlist")
+	}
+}

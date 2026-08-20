@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { NuqsAdapter } from 'nuqs/adapters/react-router/v7'
 import App from './App'
+import { AppMetaProvider } from './appMeta'
 import './styles.css'
 
 const queryClient = new QueryClient({
@@ -20,7 +21,9 @@ createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <NuqsAdapter>
         <QueryClientProvider client={queryClient}>
-          <App />
+          <AppMetaProvider>
+            <App />
+          </AppMetaProvider>
         </QueryClientProvider>
       </NuqsAdapter>
     </BrowserRouter>

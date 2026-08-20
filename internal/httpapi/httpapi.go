@@ -21,6 +21,7 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/notify"
 	"github.com/dwdmsh/school-mdm/internal/policy"
 	"github.com/dwdmsh/school-mdm/internal/store"
+	"github.com/dwdmsh/school-mdm/internal/timers"
 	"github.com/dwdmsh/school-mdm/internal/webhooks"
 	"github.com/dwdmsh/school-mdm/internal/webui"
 )
@@ -40,6 +41,7 @@ type API struct {
 	Notify   *notify.Service
 	Activity *activity.Logger
 	Webhooks *webhooks.Service
+	Timers   *timers.Service
 	Log      *slog.Logger
 
 	accessMu    sync.Mutex
@@ -48,33 +50,66 @@ type API struct {
 
 // Mount registers routes on mux.
 func (a *API) Mount(mux *http.ServeMux) {
+	admin := func(pattern string, h http.HandlerFunc) {
+		mux.HandleFunc(pattern, a.requireAdmin(h))
+	}
+
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
 	mux.HandleFunc("GET /api/openapi.json", a.handleOpenAPI)
-	mux.HandleFunc("GET /api/allowlist", a.handleAllowlist)
-	mux.HandleFunc("GET /api/allowances", a.handleListAllowances)
-	mux.HandleFunc("POST /api/allowances", a.handleCreateAllowance)
-	mux.HandleFunc("DELETE /api/allowances", a.handleDeleteAllowance)
-	mux.HandleFunc("GET /api/devices", a.handleListDevices)
-	mux.HandleFunc("PATCH /api/devices/{id}", a.handleUpdateDevice)
-	mux.HandleFunc("GET /api/admin/activity", a.requireAdmin(a.handleListActivity))
-	mux.HandleFunc("GET /api/packs", a.handleListPacks)
-	mux.HandleFunc("POST /api/packs", a.handleCreatePack)
-	mux.HandleFunc("GET /api/packs/{id}", a.handleGetPack)
-	mux.HandleFunc("PATCH /api/packs/{id}", a.handleUpdatePack)
-	mux.HandleFunc("DELETE /api/packs/{id}", a.handleDeletePack)
-	mux.HandleFunc("POST /api/packs/{id}/items", a.handleAddPackItem)
-	mux.HandleFunc("DELETE /api/packs/{id}/items", a.handleRemovePackItem)
-	mux.HandleFunc("POST /api/packs/{id}/assignments", a.handleAddPackAssignment)
-	mux.HandleFunc("DELETE /api/packs/{id}/assignments", a.handleRemovePackAssignment)
+	mux.HandleFunc("GET /api/auth/config", a.handleAuthConfig)
+	mux.HandleFunc("GET /api/auth/me", a.handleAuthMe)
+	mux.HandleFunc("POST /api/auth/logout", a.handleAuthLogout)
+	mux.HandleFunc("GET /api/auth/google/start", a.handleAuthGoogleStart)
+	mux.HandleFunc("GET /api/auth/google/callback", a.handleAuthGoogleCallback)
 
-	mux.HandleFunc("GET /api/groups", a.handleListGroups)
-	mux.HandleFunc("POST /api/groups", a.handleCreateGroup)
-	mux.HandleFunc("GET /api/groups/{id}", a.handleGetGroup)
-	mux.HandleFunc("PATCH /api/groups/{id}", a.handleUpdateGroup)
-	mux.HandleFunc("DELETE /api/groups/{id}", a.handleDeleteGroup)
-	mux.HandleFunc("GET /api/groups/{id}/members", a.handleListGroupMembers)
-	mux.HandleFunc("PUT /api/groups/{id}/members", a.handleSetGroupMembers)
+	mux.HandleFunc("GET /api/allowlist", a.handleAllowlist)
+	admin("GET /api/allowances", a.handleListAllowances)
+	admin("POST /api/allowances", a.handleCreateAllowance)
+	admin("DELETE /api/allowances", a.handleDeleteAllowance)
+	admin("GET /api/system-allowlist", a.handleListSystemAllowlist)
+	admin("POST /api/system-allowlist", a.handleUpsertSystemAllowlist)
+	admin("PATCH /api/system-allowlist", a.handlePatchSystemAllowlist)
+	admin("DELETE /api/system-allowlist", a.handleDeleteSystemAllowlist)
+	admin("GET /api/devices", a.handleListDevices)
+	admin("PATCH /api/devices/{id}", a.handleUpdateDevice)
+	admin("GET /api/admin/activity", a.handleListActivity)
+	admin("GET /api/packs", a.handleListPacks)
+	admin("POST /api/packs", a.handleCreatePack)
+	admin("GET /api/packs/{id}", a.handleGetPack)
+	admin("PATCH /api/packs/{id}", a.handleUpdatePack)
+	admin("DELETE /api/packs/{id}", a.handleDeletePack)
+	admin("POST /api/packs/{id}/items", a.handleAddPackItem)
+	admin("DELETE /api/packs/{id}/items", a.handleRemovePackItem)
+	admin("POST /api/packs/{id}/assignments", a.handleAddPackAssignment)
+	admin("DELETE /api/packs/{id}/assignments", a.handleRemovePackAssignment)
+
+	admin("GET /api/profiles", a.handleListProfiles)
+	admin("POST /api/profiles", a.handleCreateProfile)
+	admin("GET /api/profiles/{id}", a.handleGetProfile)
+	admin("PATCH /api/profiles/{id}", a.handleUpdateProfile)
+	admin("DELETE /api/profiles/{id}", a.handleDeleteProfile)
+	admin("PUT /api/profiles/{id}/payload", a.handleReplaceProfilePayload)
+	admin("GET /api/profiles/{id}/file", a.handleDownloadProfile)
+	admin("POST /api/profiles/{id}/assignments", a.handleAddProfileAssignment)
+	admin("DELETE /api/profiles/{id}/assignments", a.handleRemoveProfileAssignment)
+
+	mux.HandleFunc("GET /api/timers", a.requireAdmin(a.handleListTimers))
+	mux.HandleFunc("POST /api/timers", a.requireAdmin(a.handleCreateTimer))
+	mux.HandleFunc("POST /api/timers/run-due", a.requireAdmin(a.handleRunDueTimers))
+	mux.HandleFunc("GET /api/timers/{id}", a.requireAdmin(a.handleGetTimer))
+	mux.HandleFunc("PATCH /api/timers/{id}", a.requireAdmin(a.handleUpdateTimer))
+	mux.HandleFunc("DELETE /api/timers/{id}", a.requireAdmin(a.handleDeleteTimer))
+	mux.HandleFunc("POST /api/timers/{id}/run", a.requireAdmin(a.handleRunTimer))
+
+	admin("GET /api/groups", a.handleListGroups)
+	admin("POST /api/groups", a.handleCreateGroup)
+	admin("GET /api/groups/{id}", a.handleGetGroup)
+	admin("PATCH /api/groups/{id}", a.handleUpdateGroup)
+	admin("DELETE /api/groups/{id}", a.handleDeleteGroup)
+	admin("GET /api/groups/{id}/members", a.handleListGroupMembers)
+	admin("PUT /api/groups/{id}/members", a.handleSetGroupMembers)
 	mux.HandleFunc("GET /api/apps/search", a.handleAppSearch)
+	mux.HandleFunc("GET /api/apps/lookup", a.handleAppLookupMany)
 	mux.HandleFunc("GET /api/apps/{bundleID}", a.handleAppLookup)
 	mux.HandleFunc("GET /api/access-status", a.handleAccessStatus)
 	mux.HandleFunc("GET /api/device/{deviceID}/requests", a.handleDeviceRequests)
@@ -82,13 +117,13 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/device/{deviceID}/push-token", a.handleDevicePushToken)
 	mux.HandleFunc("POST /api/devices/{id}/push-token", a.handleDevicePushTokenAlias)
 	mux.HandleFunc("POST /api/requests", a.handleCreateRequest)
-	mux.HandleFunc("GET /api/requests", a.handleListRequests)
-	mux.HandleFunc("GET /api/requests/{id}", a.handleGetRequest)
+	admin("GET /api/requests", a.handleListRequests)
+	admin("GET /api/requests/{id}", a.handleGetRequest)
 	mux.HandleFunc("GET /api/requests/{id}/messages", a.handleListMessages)
-	mux.HandleFunc("POST /api/requests/{id}/messages", a.handleAdminPostMessage)
-	mux.HandleFunc("POST /api/requests/{id}/approve", a.handleApprove)
-	mux.HandleFunc("POST /api/requests/{id}/deny", a.handleDeny)
-	mux.HandleFunc("GET /api/stub-commands", a.handleStubCommands)
+	admin("POST /api/requests/{id}/messages", a.handleAdminPostMessage)
+	admin("POST /api/requests/{id}/approve", a.handleApprove)
+	admin("POST /api/requests/{id}/deny", a.handleDeny)
+	admin("GET /api/stub-commands", a.handleStubCommands)
 
 	mux.HandleFunc("GET /api/credits/balance", a.handleCreditBalance)
 	mux.HandleFunc("GET /api/credits/packages", a.handleCreditPackages)
@@ -100,22 +135,22 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/credits/nedarim-bridge", a.handleNedarimBridge)
 	mux.HandleFunc("POST /api/webhooks/nedarim", a.handleNedarimWebhook)
 	mux.HandleFunc("POST /api/webhooks/nedarim/fake", a.handleNedarimWebhook)
-	mux.HandleFunc("POST /api/admin/credits/gift", a.handleAdminGiftCredits)
-	mux.HandleFunc("POST /api/admin/credits/adjust", a.handleAdminAdjustCredits)
-	mux.HandleFunc("GET /api/admin/credits", a.handleAdminListCredits)
-	mux.HandleFunc("GET /api/admin/credits/ledger", a.handleAdminCreditLedger)
-	mux.HandleFunc("GET /api/admin/credits/purchases", a.requireAdmin(a.handleAdminListPurchases))
-	mux.HandleFunc("GET /api/admin/credits/settings", a.handleAdminGetCreditSettings)
-	mux.HandleFunc("PUT /api/admin/credits/settings", a.handleAdminPutCreditSettings)
-	mux.HandleFunc("GET /api/admin/credits/packages", a.handleAdminListPackages)
-	mux.HandleFunc("POST /api/admin/credits/packages", a.handleAdminCreatePackage)
-	mux.HandleFunc("PUT /api/admin/credits/packages/{id}", a.handleAdminUpdatePackage)
-	mux.HandleFunc("DELETE /api/admin/credits/packages/{id}", a.handleAdminDeletePackage)
-	mux.HandleFunc("GET /api/admin/credits/allotments", a.handleAdminListAllotments)
-	mux.HandleFunc("POST /api/admin/credits/allotments", a.handleAdminCreateAllotment)
-	mux.HandleFunc("PUT /api/admin/credits/allotments/{id}", a.handleAdminUpdateAllotment)
-	mux.HandleFunc("DELETE /api/admin/credits/allotments/{id}", a.handleAdminDeleteAllotment)
-	mux.HandleFunc("POST /api/admin/credits/allotments/run", a.handleAdminRunAllotments)
+	admin("POST /api/admin/credits/gift", a.handleAdminGiftCredits)
+	admin("POST /api/admin/credits/adjust", a.handleAdminAdjustCredits)
+	admin("GET /api/admin/credits", a.handleAdminListCredits)
+	admin("GET /api/admin/credits/ledger", a.handleAdminCreditLedger)
+	admin("GET /api/admin/credits/purchases", a.handleAdminListPurchases)
+	admin("GET /api/admin/credits/settings", a.handleAdminGetCreditSettings)
+	admin("PUT /api/admin/credits/settings", a.handleAdminPutCreditSettings)
+	admin("GET /api/admin/credits/packages", a.handleAdminListPackages)
+	admin("POST /api/admin/credits/packages", a.handleAdminCreatePackage)
+	admin("PUT /api/admin/credits/packages/{id}", a.handleAdminUpdatePackage)
+	admin("DELETE /api/admin/credits/packages/{id}", a.handleAdminDeletePackage)
+	admin("GET /api/admin/credits/allotments", a.handleAdminListAllotments)
+	admin("POST /api/admin/credits/allotments", a.handleAdminCreateAllotment)
+	admin("PUT /api/admin/credits/allotments/{id}", a.handleAdminUpdateAllotment)
+	admin("DELETE /api/admin/credits/allotments/{id}", a.handleAdminDeleteAllotment)
+	admin("POST /api/admin/credits/allotments/run", a.handleAdminRunAllotments)
 
 	// MDM admin (thin; requires Bearer admin token)
 	mux.HandleFunc("GET /api/mdm/status", a.requireAdmin(a.handleMDMStatus))
@@ -154,13 +189,12 @@ func (a *API) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mdm/abm/dep-names", a.requireAdmin(a.handleABMDEPNames))
 	mux.HandleFunc("GET /api/mdm/abm/devices", a.requireAdmin(a.handleABMListDevices))
 	mux.HandleFunc("POST /api/mdm/abm/sync", a.requireAdmin(a.handleABMSync))
-	// Profile read remains available to external enrollment tooling. Creating or
-	// replacing an Apple profile must stay admin-only.
-	mux.HandleFunc("GET /api/mdm/abm/profile", a.handleABMGetProfile)
+	// Creating or replacing an Apple profile must stay admin-only.
+	admin("GET /api/mdm/abm/profile", a.handleABMGetProfile)
 	mux.HandleFunc("POST /api/mdm/abm/profile", a.requireAdmin(a.handleABMDefineProfile))
 	mux.HandleFunc("POST /api/mdm/abm/assign", a.requireAdmin(a.handleABMAssignProfile))
 
-	mux.HandleFunc("GET /api/webhooks/events", a.handleWebhookEvents)
+	admin("GET /api/webhooks/events", a.handleWebhookEvents)
 	mux.HandleFunc("GET /api/webhooks", a.requireAdmin(a.handleListWebhooks))
 	mux.HandleFunc("POST /api/webhooks", a.requireAdmin(a.handleCreateWebhook))
 	mux.HandleFunc("GET /api/webhooks/{id}", a.requireAdmin(a.handleGetWebhook))
@@ -192,6 +226,17 @@ func (a *API) handleAllowlist(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	sys := a.enabledSystemKeys(r)
+	if len(sys) > 0 {
+		visible := make([]string, 0, len(apps))
+		for _, app := range apps {
+			if _, hide := sys[policy.AppKey(app)]; hide {
+				continue
+			}
+			visible = append(visible, app)
+		}
+		apps = visible
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": apps, "urls": urls})
 }
@@ -251,6 +296,53 @@ func (a *API) handleAppLookup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, row)
+}
+
+func (a *API) handleAppLookupMany(w http.ResponseWriter, r *http.Request) {
+	ids := r.URL.Query()["id"]
+	if extra := strings.TrimSpace(r.URL.Query().Get("ids")); extra != "" {
+		ids = append(ids, strings.Split(extra, ",")...)
+	}
+	if len(ids) > 80 {
+		ids = ids[:80]
+	}
+	remote := r.URL.Query().Get("fetch") != "0"
+	var list []store.AppMeta
+	if a.Catalog != nil {
+		list = a.Catalog.LookupMany(r.Context(), ids, remote)
+	} else {
+		seen := map[string]struct{}{}
+		for _, raw := range ids {
+			id := strings.TrimSpace(raw)
+			if id == "" {
+				continue
+			}
+			key := strings.ToLower(id)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if a.Store != nil {
+				if meta, err := a.Store.GetAppMeta(r.Context(), id); err == nil {
+					list = append(list, meta)
+					continue
+				}
+			}
+			if meta, ok := appmeta.Known(id); ok {
+				list = append(list, meta)
+				continue
+			}
+			list = append(list, store.AppMeta{BundleID: id, Name: id, Source: "unknown"})
+		}
+	}
+	if list == nil {
+		list = []store.AppMeta{}
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, m := range list {
+		out = append(out, appMetaJSON(m))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type createRequestBody struct {
@@ -324,8 +416,12 @@ func (a *API) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Optional device ownership check for portal privacy
-	if device := strings.TrimSpace(r.URL.Query().Get("enrollment_id")); device != "" {
+	if !a.authorizedAdmin(r) {
+		device := strings.TrimSpace(r.URL.Query().Get("enrollment_id"))
+		if device == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin authorization required"})
+			return
+		}
 		req, err := a.Store.GetRequest(r.Context(), id)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {

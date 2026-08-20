@@ -32,8 +32,14 @@ func (a *API) auditAction(r *http.Request, action string, payload map[string]any
 		switch action {
 		case actionAllowlistAdd:
 			summary = "נוסף לרשימת המותרים"
+			if label := payloadLabel(payload); label != "" {
+				summary += " · " + label
+			}
 		case actionAllowlistRemove:
 			summary = "הוסר מרשימת המותרים"
+			if label := payloadLabel(payload); label != "" {
+				summary += " · " + label
+			}
 		case actionGroupMemberAdd:
 			summary = "נוסף לקבוצה"
 		case actionGroupMemberRemove:
@@ -64,4 +70,17 @@ func (a *API) auditAction(r *http.Request, action string, payload map[string]any
 		Summary:      summary,
 		Detail:       payload,
 	})
+}
+
+func payloadLabel(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if v, ok := payload["app_name"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := payload["value"].(string); ok {
+		return v
+	}
+	return ""
 }

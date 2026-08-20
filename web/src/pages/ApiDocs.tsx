@@ -277,7 +277,7 @@ function OperationCard({
       const headers: Record<string, string> = {}
       const token = getAdminToken()
       if (token) headers.Authorization = `Bearer ${token}`
-      const init: RequestInit = { method: row.method.toUpperCase(), headers }
+      const init: RequestInit = { method: row.method.toUpperCase(), headers, credentials: 'include' }
       if (hasBody && row.method !== 'get') {
         headers['Content-Type'] = 'application/json'
         init.body = body
@@ -523,9 +523,9 @@ function WebhooksTab({ lang }: { lang: Lang }) {
 
   const eventsQuery = useQuery({ queryKey: ['webhook-events'], queryFn: () => api.webhookEvents() })
   const listQuery = useQuery({
-    queryKey: ['webhooks', getAdminToken()],
+    queryKey: ['webhooks'],
     queryFn: () => api.webhooks(),
-    enabled: !!getAdminToken(),
+    enabled: true,
   })
   const deliveriesQuery = useQuery({
     queryKey: ['webhook-deliveries', deliveriesFor?.id],
@@ -632,7 +632,6 @@ function WebhooksTab({ lang }: { lang: Lang }) {
           {ui.addEndpoint}
         </Button>
       </Flex>
-      {!getAdminToken() ? <Alert type="warning" showIcon message={ui.tokenNeeded} /> : null}
       <Table
         rowKey="id"
         loading={listQuery.isLoading}

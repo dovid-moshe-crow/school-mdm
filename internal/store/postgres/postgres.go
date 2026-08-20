@@ -39,13 +39,17 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := s.seedSystemAllowlist(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
-func (s *Store) Kind() string                    { return "postgres" }
+func (s *Store) Kind() string                   { return "postgres" }
 
 func (s *Store) migrate(ctx context.Context) error {
 	// Ensure tracking table exists before reading filenames (bootstrapped by 001 too).

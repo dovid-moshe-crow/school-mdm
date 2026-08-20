@@ -50,16 +50,31 @@ make run           # or: make dev
 Then open http://localhost:8080/healthz — you should see `"store":"postgres"`.
 
 Claim the DB to your Neon account (optional, keeps it permanently) using `PUBLIC_POSTGRES_CLAIM_URL` in `.env`.
+
+## Admin login
+
+The admin UI (`/admin`, `/api-docs`) requires a signed-in admin. **Sign in with Google** is the production path (`golang.org/x/oauth2`):
+
+1. Google Cloud Console → APIs & Services → Credentials → Create OAuth client (Web application).
+2. Add authorized redirect URI `https://YOUR_HOST/api/auth/google/callback`.
+3. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `ADMIN_EMAILS` (comma-separated) or `ADMIN_GOOGLE_HOSTED_DOMAIN`.
+4. Restart the server. Open `/admin` and use **התחברות עם Google**.
+
+Scripts can still send `Authorization: Bearer <ADMIN_TOKENS>`. Locally, if Google is not configured, `/admin` accepts the `ADMIN_TOKENS` value (default `dev-admin-token`).
+
+Student portal routes stay public and are scoped by device id. Admin JSON routes (devices, packs, groups, approve/deny, MDM, credits admin, webhooks, …) return 401 without a session cookie or Bearer token.
 ## HTTP
 
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/` | explains device-scoped portal |
 | GET | `/d/{deviceID}` | student portal (device id in URL; `?url=` optional) |
-| GET | `/admin` | admin queue |
+| GET | `/admin` | admin queue (Google sign-in or `ADMIN_TOKENS`) |
 | GET | `/api-docs` | interactive API reference + webhook manager |
 | GET | `/api/openapi.json` | OpenAPI 3.1 for every admin capability |
 | GET/POST/PATCH/DELETE | `/api/webhooks` | outbound activity webhooks (Bearer `ADMIN_TOKENS`) |
+| GET/POST/PATCH/DELETE | `/api/timers` | scheduled add/remove of whitelist packs and custom profiles on devices/groups (Bearer `ADMIN_TOKENS`; weekly clocks are Asia/Jerusalem) |
+| GET/POST/PATCH/DELETE | `/api/profiles` | uploaded Apple `.mobileconfig` profiles, assignable to everyone / groups / devices (Bearer `ADMIN_TOKENS`) |
 | GET | `/api/apps/search?q=` | App Store search (cache + iTunes fallback) |
 | GET | `/api/apps/{bundleID}` | lookup/cached metadata |
 | POST | `/api/requests` | create request (`enrollment_id` usually from `/d/...`) |

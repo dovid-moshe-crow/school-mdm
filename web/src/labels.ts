@@ -1,4 +1,4 @@
-import type { Device, Group, WhitelistPack } from './api'
+import type { CustomProfile, Device, Group, WhitelistPack } from './api'
 import { matchesQuery, searchText } from './search'
 
 export function deviceLabel(d: Device | string, devices?: Device[]): string {
@@ -18,6 +18,10 @@ export function groupSearchText(g: Group): string {
 
 export function packSearchText(p: WhitelistPack): string {
   return searchText(p.name, p.description, p.id)
+}
+
+export function profileSearchText(p: CustomProfile): string {
+  return searchText(p.name, p.description, p.payload_identifier, p.filename, p.id)
 }
 
 export function deviceMatches(d: Device, query: string): boolean {

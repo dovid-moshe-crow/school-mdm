@@ -16,27 +16,29 @@ import (
 
 // Store is an in-memory Store for local development without Neon.
 type Store struct {
-	mu        sync.Mutex
-	allowlist map[string]policy.Entry
-	grants    map[string]policy.Grant
-	requests  map[string]store.Request
-	messages  map[string][]store.RequestMessage // requestID -> chronological
-	apps      map[string]store.AppMeta
-	groups    map[string]store.Group
-	members   map[string]map[string]struct{} // groupID -> enrollmentID set
-	devices       map[string]string // enrollmentID -> name
-	unrestricted  map[string]bool
-	activityEvents  []store.ActivityEvent
-	packs         map[string]store.WhitelistPack
-	packItems     map[string][]store.WhitelistPackItem            // packID -> items
-	packAssign    map[string][]store.WhitelistPackAssignment      // packID -> assignments
+	mu             sync.Mutex
+	allowlist      map[string]policy.Entry
+	grants         map[string]policy.Grant
+	requests       map[string]store.Request
+	messages       map[string][]store.RequestMessage // requestID -> chronological
+	apps           map[string]store.AppMeta
+	groups         map[string]store.Group
+	members        map[string]map[string]struct{} // groupID -> enrollmentID set
+	devices        map[string]string              // enrollmentID -> name
+	unrestricted   map[string]bool
+	activityEvents []store.ActivityEvent
+	packs          map[string]store.WhitelistPack
+	packItems      map[string][]store.WhitelistPackItem       // packID -> items
+	packAssign     map[string][]store.WhitelistPackAssignment // packID -> assignments
+	customProfiles map[string]store.CustomProfile
+	profileAssign  map[string][]store.CustomProfileAssignment // profileID -> assignments
 
-	credits   map[string]store.DeviceCredits
-	ledger    []store.CreditLedgerEntry
-	ledgerKey map[string]struct{} // reason|refType|refID
-	packages  map[string]store.CreditPackage
-	purchases map[string]store.CreditPurchase
-	clientUID map[string]string // clientUniqueID -> purchaseID
+	credits     map[string]store.DeviceCredits
+	ledger      []store.CreditLedgerEntry
+	ledgerKey   map[string]struct{} // reason|refType|refID
+	packages    map[string]store.CreditPackage
+	purchases   map[string]store.CreditPurchase
+	clientUID   map[string]string // clientUniqueID -> purchaseID
 	settings    *store.CreditSettings
 	mdmSettings *store.MDMSettings
 	abmDevices  json.RawMessage
@@ -48,24 +50,28 @@ type Store struct {
 
 	webhooks          []store.WebhookEndpoint
 	webhookDeliveries []store.WebhookDelivery
+	policyTimers      map[string]store.PolicyTimer
+	systemAllowlist   map[string]store.SystemAllowlistItem
 }
 
 // New creates an empty memory store seeded with essentials as durable entries.
 func New() *Store {
 	s := &Store{
-		allowlist: map[string]policy.Entry{},
-		grants:    map[string]policy.Grant{},
-		requests:  map[string]store.Request{},
-		messages:  map[string][]store.RequestMessage{},
-		apps:      map[string]store.AppMeta{},
-		groups:    map[string]store.Group{},
-		members:      map[string]map[string]struct{}{},
-		devices:      map[string]string{},
-		unrestricted: map[string]bool{},
-		packs:        map[string]store.WhitelistPack{},
-		packItems:    map[string][]store.WhitelistPackItem{},
-		packAssign:   map[string][]store.WhitelistPackAssignment{},
-		credits:      map[string]store.DeviceCredits{},
+		allowlist:       map[string]policy.Entry{},
+		grants:          map[string]policy.Grant{},
+		requests:        map[string]store.Request{},
+		messages:        map[string][]store.RequestMessage{},
+		apps:            map[string]store.AppMeta{},
+		groups:          map[string]store.Group{},
+		members:         map[string]map[string]struct{}{},
+		devices:         map[string]string{},
+		unrestricted:    map[string]bool{},
+		packs:           map[string]store.WhitelistPack{},
+		packItems:       map[string][]store.WhitelistPackItem{},
+		packAssign:      map[string][]store.WhitelistPackAssignment{},
+		customProfiles:  map[string]store.CustomProfile{},
+		profileAssign:   map[string][]store.CustomProfileAssignment{},
+		credits:         map[string]store.DeviceCredits{},
 		ledger:          nil,
 		ledgerKey:       map[string]struct{}{},
 		packages:        map[string]store.CreditPackage{},
@@ -74,12 +80,19 @@ func New() *Store {
 		pushTokens:      map[string]store.DevicePushToken{},
 		allotmentRules:  map[string]store.CreditAllotmentRule{},
 		allotmentGrants: map[string]store.CreditAllotmentGrant{},
+		policyTimers:    map[string]store.PolicyTimer{},
+		systemAllowlist: map[string]store.SystemAllowlistItem{},
 	}
 	for _, app := range policy.Essentials {
 		id := uuid.NewString()
 		t := policy.Target{Type: policy.TargetGlobal}
 		s.allowlist[entryKey(policy.KindApp, app, t)] = policy.Entry{
 			ID: id, Kind: policy.KindApp, Value: app, Target: t,
+		}
+	}
+	for _, app := range policy.SystemDefaults {
+		s.systemAllowlist[systemKey(policy.KindApp, app)] = store.SystemAllowlistItem{
+			Kind: policy.KindApp, Value: app, Enabled: true,
 		}
 	}
 	seedCreditPackages(s)

@@ -1,6 +1,5 @@
 import { ArrowRightOutlined, ReloadOutlined } from '@ant-design/icons'
 import {
-  Alert,
   App,
   Button,
   Card,
@@ -19,8 +18,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   api,
-  getAdminToken,
-  setAdminToken,
   type Allowance,
   type AppMeta,
   type Device,
@@ -28,6 +25,7 @@ import {
   type MdmCommandResult,
 } from '../api'
 import { AppSearchPicker } from '../components/AppSearchPicker'
+import { EffectivePolicyView } from '../components/EffectivePolicyView'
 import { DeviceActionModals } from '../components/DeviceActionModals'
 import { DeviceMdmActions } from '../components/DeviceMdmActions'
 import { SearchableCollection } from '../components/ListSearch'
@@ -36,15 +34,15 @@ import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
 import { he } from '../he'
 import { formatRelativeHe } from '../time'
-import { AppThumb } from '../ui'
+import { AppIdentity } from '../appMeta'
+import { appTitle } from '../knownApps'
 
 const EMPTY_DEVICES: Device[] = []
 const EMPTY_GROUPS: Group[] = []
 const EMPTY_ALLOWANCES: Allowance[] = []
-const EMPTY_STRINGS: string[] = []
 
 function allowanceSearchText(row: Allowance) {
-  return `${row.app?.app_name || ''} ${row.value} ${row.kind}`
+  return `${appTitle(row.app, row.value)} ${row.value} ${row.kind}`
 }
 
 export default function DeviceAdmin() {
@@ -74,15 +72,10 @@ export default function DeviceAdmin() {
   const groups = groupsQuery.data ?? EMPTY_GROUPS
   const device = devices.find((d) => d.enrollment_id === deviceId)
 
-  const effectiveQuery = useQuery({
-    queryKey: ['effective-allowlist', deviceId],
-    queryFn: () => api.effectiveAllowlist(deviceId),
-    enabled: !!deviceId,
-  })
   const mdmDetailQuery = useQuery({
     queryKey: ['mdm-device', deviceId],
     queryFn: () => api.mdmGetDevice(deviceId),
-    enabled: !!deviceId && !!device?.mdm && !!getAdminToken(),
+    enabled: !!deviceId && !!device?.mdm,
     retry: false,
   })
 
@@ -94,7 +87,13 @@ export default function DeviceAdmin() {
     },
     enabled: !!deviceId,
   })
+  const deviceProfilesQuery = useQuery({
+    queryKey: ['profiles', 'device', deviceId],
+    queryFn: () => api.profiles(deviceId),
+    enabled: !!deviceId,
+  })
   const deviceAllowances = deviceAllowQuery.data ?? EMPTY_ALLOWANCES
+  const deviceProfiles = deviceProfilesQuery.data ?? []
 
   const unrestrictedMutation = useMutation({
     mutationFn: ({ id, on }: { id: string; on: boolean }) => api.setDeviceUnrestricted(id, on),
@@ -118,7 +117,6 @@ export default function DeviceAdmin() {
 
   const statusChips = useMemo(() => deviceStatusFromInfo(statusResult), [statusResult])
   const displayName = device?.name || device?.serial_number || deviceId
-  const adminTokenPresent = !!getAdminToken()
 
   async function refreshStatus() {
     if (!deviceId || !device?.mdm) return
@@ -132,10 +130,10 @@ export default function DeviceAdmin() {
   }
 
   useEffect(() => {
-    if (!deviceId || !device?.mdm || !adminTokenPresent) return
+    if (!deviceId || !device?.mdm) return
     void refreshStatus()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh once when device/mdm/token ready
-  }, [deviceId, device?.mdm, adminTokenPresent])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh once when device/mdm ready
+  }, [deviceId, device?.mdm])
 
   async function addUrl() {
     const lines = urlDraft
@@ -214,8 +212,8 @@ export default function DeviceAdmin() {
     .map((gid) => groups.find((g) => g.id === gid)?.name || gid)
     .filter(Boolean)
 
-  const deviceApps = deviceAllowances.filter((a) => a.kind === 'app')
-  const deviceUrls = deviceAllowances.filter((a) => a.kind === 'url')
+  const deviceApps = deviceAllowances.filter((a) => a.kind === 'app' && a.source === 'device')
+  const deviceUrls = deviceAllowances.filter((a) => a.kind === 'url' && a.source === 'device')
 
   return (
     <div className={isMobile ? 'page-shell wide device-admin-page admin-mobile-shell' : 'page-shell wide device-admin-page'}>
@@ -228,29 +226,6 @@ export default function DeviceAdmin() {
           {he.backToDevices}
         </Button>
       </div>
-
-      {!adminTokenPresent ? (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message={he.mdmAdminTokenMissing}
-          description={he.mdmAdminTokenHint}
-          action={
-            <Button
-              size="small"
-              type="primary"
-              onClick={() => {
-                setAdminToken('dev-admin-token')
-                message.success(he.mdmSaveToken)
-                void qc.invalidateQueries()
-              }}
-            >
-              {he.mdmUseDefaultToken}
-            </Button>
-          }
-        />
-      ) : null}
 
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <Card size="small" className="device-hero-card">
@@ -380,35 +355,34 @@ export default function DeviceAdmin() {
             <Typography.Text type="secondary">{he.allowAll}</Typography.Text>
           ) : (
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
-              <Typography.Text type="secondary">{he.whitelistApps}</Typography.Text>
-              <SearchableCollection
-                items={effectiveQuery.data?.apps || EMPTY_STRINGS}
-                text={(app) => app}
-                emptyText={he.emptyAllow}
-              >
-                {(apps) => (
-                  <Space wrap size={[4, 4]}>
-                    {apps.map((app) => (
-                      <Tag key={app}>{app}</Tag>
-                    ))}
-                  </Space>
-                )}
-              </SearchableCollection>
-              <Typography.Text type="secondary">{he.whitelistWeb}</Typography.Text>
-              <SearchableCollection
-                items={effectiveQuery.data?.urls || EMPTY_STRINGS}
-                text={(u) => u}
-                emptyText={he.emptyAllow}
-              >
-                {(urls) => (
-                  <Space wrap size={[4, 4]}>
-                    {urls.map((u) => (
-                      <Tag key={u}>{u}</Tag>
-                    ))}
-                  </Space>
-                )}
-              </SearchableCollection>
+              {deviceAllowQuery.isLoading ? <Spin /> : (
+                <EffectivePolicyView rows={deviceAllowances} groups={groups} />
+              )}
             </Space>
+          )}
+        </Card>
+
+        <Card size="small" title={he.profileOnDevice}>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+            {he.profileOnDeviceHint}
+          </Typography.Paragraph>
+          {deviceProfilesQuery.isLoading ? (
+            <Spin />
+          ) : !deviceProfiles.length ? (
+            <Typography.Text type="secondary">{he.profileOnDeviceEmpty}</Typography.Text>
+          ) : (
+            <List
+              size="small"
+              dataSource={deviceProfiles}
+              renderItem={(p) => (
+                <List.Item>
+                  <List.Item.Meta
+                    title={p.name}
+                    description={p.payload_identifier}
+                  />
+                </List.Item>
+              )}
+            />
           )}
         </Card>
 
@@ -438,9 +412,7 @@ export default function DeviceAdmin() {
                     ]}
                   >
                     <List.Item.Meta
-                      avatar={<AppThumb name={row.app?.app_name || row.value} url={row.app?.artwork_url} />}
-                      title={row.app?.app_name || row.value}
-                      description={row.value}
+                      title={<AppIdentity bundleId={row.value} meta={row.app} size={36} />}
                     />
                   </List.Item>
                       )}

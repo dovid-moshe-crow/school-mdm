@@ -107,9 +107,13 @@ export function AppSearchPicker({
                 ]}
               >
                 <List.Item.Meta
-                  avatar={<AppThumb name={app.app_name} url={app.artwork_url} />}
+                  avatar={<AppThumb name={app.app_name} url={app.artwork_url} load />}
                   title={app.app_name}
-                  description={app.developer ? `${app.developer} · ${app.bundle_id}` : app.bundle_id}
+                  description={
+                    app.developer ? (
+                      <Typography.Text type="secondary">{app.developer}</Typography.Text>
+                    ) : null
+                  }
                 />
               </List.Item>
             )

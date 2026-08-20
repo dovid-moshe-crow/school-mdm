@@ -52,7 +52,10 @@ func (s *Service) Reconcile(ctx context.Context, enrollmentID string) error {
 		if err := s.EnsureLockScreenMessage(ctx, id); err != nil {
 			return err
 		}
-		return s.EnsureCompanionApp(ctx, id)
+		if err := s.EnsureCompanionApp(ctx, id); err != nil {
+			return err
+		}
+		return s.EnsureCustomProfiles(ctx, id)
 	}
 	apps, urls, err := s.EffectiveAllowlist(ctx, id)
 	if err != nil {
@@ -72,7 +75,10 @@ func (s *Service) Reconcile(ctx context.Context, enrollmentID string) error {
 	if err := s.EnsureLockScreenMessage(ctx, id); err != nil {
 		return err
 	}
-	return s.EnsureCompanionApp(ctx, id)
+	if err := s.EnsureCompanionApp(ctx, id); err != nil {
+		return err
+	}
+	return s.EnsureCustomProfiles(ctx, id)
 }
 
 // legacyLockScreenProfileIDs are old NanoHUB / prior MDM lock-screen profiles.
@@ -252,6 +258,61 @@ func (s *Service) EnsureCompanionNotifications(ctx context.Context, enrollmentID
 	return s.Enqueue.InstallProfile(ctx, id, profile)
 }
 
+// EnsureCustomProfiles installs assigned custom .mobileconfig profiles and
+// removes catalog profiles that no longer apply to this device.
+func (s *Service) EnsureCustomProfiles(ctx context.Context, enrollmentID string) error {
+	if s == nil || s.Store == nil || s.Enqueue == nil {
+		return fmt.Errorf("devicepush not configured")
+	}
+	id := strings.TrimSpace(enrollmentID)
+	if id == "" {
+		return nil
+	}
+	groups, err := s.Store.ListGroupsForDevice(ctx, id)
+	if err != nil {
+		return err
+	}
+	desired, err := s.Store.ListCustomProfilesForDevice(ctx, id, groups)
+	if err != nil {
+		return err
+	}
+	catalog, err := s.Store.ListCustomProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	want := map[string]struct{}{}
+	for _, p := range desired {
+		ident := strings.TrimSpace(p.PayloadIdentifier)
+		if ident == "" || profiles.IsManagedIdentifier(ident) {
+			continue
+		}
+		payload := p.Payload
+		if len(payload) == 0 {
+			payload, err = s.Store.GetCustomProfilePayload(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+		}
+		if err := s.Enqueue.InstallProfile(ctx, id, payload); err != nil {
+			return err
+		}
+		want[ident] = struct{}{}
+	}
+	for _, p := range catalog {
+		ident := strings.TrimSpace(p.PayloadIdentifier)
+		if ident == "" {
+			continue
+		}
+		if _, ok := want[ident]; ok {
+			continue
+		}
+		if err := s.Enqueue.RemoveProfile(ctx, id, ident); err != nil && s.Log != nil {
+			s.Log.Warn("remove custom profile", "enrollment_id", id, "profile", ident, "err", err)
+		}
+	}
+	return nil
+}
+
 func (s *Service) associateCompanionLicense(ctx context.Context, settings store.MDMSettings, enrollmentID string) error {
 	token := vpp.TokenString(settings.VPPToken)
 	if token == "" || s.MDMStore == nil {
@@ -351,6 +412,20 @@ func (s *Service) EffectiveAllowlist(ctx context.Context, enrollmentID string) (
 	}
 	if len(fromPacks) > 0 {
 		base = append(append([]policy.Entry{}, base...), fromPacks...)
+	}
+	sys, err := s.Store.ListSystemAllowlist(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, it := range sys {
+		if !it.Enabled {
+			continue
+		}
+		base = append(base, policy.Entry{
+			Kind:   it.Kind,
+			Value:  it.Value,
+			Target: policy.Target{Type: policy.TargetGlobal},
+		})
 	}
 	apps, urls = policy.Effective(base, grants, groups, enrollmentID, time.Now().UTC())
 	urls = appendPortalURLs(urls, s.PortalURL, enrollmentID)

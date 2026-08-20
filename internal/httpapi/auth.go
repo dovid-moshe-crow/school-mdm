@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// requireAdmin wraps a handler with Bearer admin token check (shared for school + MDM mutators).
+// requireAdmin wraps a handler with admin session cookie or Bearer token check.
 func (a *API) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !a.authorizedAdmin(r) {
@@ -16,7 +16,7 @@ func (a *API) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// DepAuth wraps NanoDEP /dep handlers: Bearer admin token or Basic (password = admin token).
+// DepAuth wraps NanoDEP /dep handlers: session cookie, Bearer admin token, or Basic (password = admin token).
 func (a *API) DepAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.authorizedAdmin(r) {
@@ -28,6 +28,9 @@ func (a *API) DepAuth(next http.Handler) http.Handler {
 }
 
 func (a *API) authorizedAdmin(r *http.Request) bool {
+	if _, ok := a.sessionFromRequest(r); ok {
+		return true
+	}
 	if tok := bearerToken(r); tok != "" && a.Cfg.ValidAdminToken(tok) {
 		return true
 	}
@@ -39,9 +42,6 @@ func (a *API) authorizedAdmin(r *http.Request) bool {
 
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
-	if h == "" {
-		return strings.TrimSpace(r.URL.Query().Get("admin_token"))
-	}
 	const p = "Bearer "
 	if strings.HasPrefix(strings.ToLower(h), strings.ToLower(p)) {
 		return strings.TrimSpace(h[len(p):])

@@ -14,7 +14,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, getAdminToken, type CreditPurchase } from '../api'
+import { api, type CreditPurchase } from '../api'
 import { ListSearchBar } from '../components/ListSearch'
 import { he } from '../he'
 import { deviceLabel, deviceOptions, searchableSelect } from '../labels'
@@ -50,7 +50,7 @@ export default function AdminCreditPurchases() {
   const devicesQuery = useQuery({
     queryKey: ['devices'],
     queryFn: () => api.devices(),
-    enabled: !!getAdminToken(),
+    enabled: true,
   })
 
   const filter = useMemo(
@@ -66,7 +66,7 @@ export default function AdminCreditPurchases() {
   const purchasesQuery = useQuery({
     queryKey: ['admin-credit-purchases', filter],
     queryFn: () => api.adminCreditPurchases(filter),
-    enabled: !!getAdminToken(),
+    enabled: true,
     refetchInterval: 20_000,
   })
 

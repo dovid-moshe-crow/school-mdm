@@ -1,9 +1,8 @@
 import { App, Button, Card, Empty, Input, List, Segmented, Select, Space, Tag, Typography } from 'antd'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import {
   api,
-  type AppMeta,
   type Device,
   type Group,
   type WhitelistPack,
@@ -12,9 +11,11 @@ import {
 } from '../api'
 import { he } from '../he'
 import { deviceLabel, deviceOptions, groupOptions, searchableSelect } from '../labels'
-import { AppThumb } from '../ui'
+import { AppIdentity, useAppMetaStore } from '../appMeta'
+import { appTitle } from '../knownApps'
 import { AppSearchPicker } from './AppSearchPicker'
 import { SearchableCollection } from './ListSearch'
+import { VirtualList } from './VirtualList'
 
 export function PackEditor({
   packId,
@@ -41,25 +42,7 @@ export function PackEditor({
   const apps = items.filter((it) => it.kind === 'app')
   const urls = items.filter((it) => it.kind === 'url')
   const inPack = useMemo(() => new Set(apps.map((it) => it.value)), [apps])
-
-  const metaQuery = useQuery({
-    queryKey: ['pack-item-meta', packId, apps.map((a) => a.value).sort().join('|')],
-    queryFn: async () => {
-      const out: Record<string, AppMeta> = {}
-      await Promise.all(
-        apps.slice(0, 50).map(async (it) => {
-          try {
-            out[it.value] = await api.lookupApp(it.value)
-          } catch {
-            /* unknown bundle */
-          }
-        }),
-      )
-      return out
-    },
-    enabled: apps.length > 0,
-  })
-  const meta = metaQuery.data ?? {}
+  const { get } = useAppMetaStore()
 
   const addItem = useMutation({
     mutationFn: ({ itemKind, value }: { itemKind: string; value: string }) =>
@@ -190,51 +173,37 @@ export function PackEditor({
             apps.length ? (
               <SearchableCollection
                 items={apps}
-                text={(it) => `${meta[it.value]?.app_name || ''} ${it.value}`}
+                text={(it) => `${appTitle(get(it.value), it.value)} ${it.value}`}
                 placeholder={he.searchPlaceholder}
               >
                 {(rows) => (
-                  <List
-                    size="small"
-                    header={
-                      <Typography.Text type="secondary">
-                        {he.packAppsInPack} · {apps.length}
-                      </Typography.Text>
-                    }
-                    dataSource={rows}
-                    renderItem={(it) => {
-                      const app = meta[it.value]
-                      return (
-                        <List.Item
-                          actions={[
-                            <Button
-                              key="rm"
-                              type="link"
-                              danger
-                              size="small"
-                              loading={
-                                removeItem.isPending &&
-                                removeItem.variables?.value === it.value
-                              }
-                              onClick={() =>
-                                removeItem.mutate({ itemKind: 'app', value: it.value })
-                              }
-                            >
-                              {he.removeOverride}
-                            </Button>,
-                          ]}
-                        >
-                          <List.Item.Meta
-                            avatar={
-                              <AppThumb name={app?.app_name || it.value} url={app?.artwork_url} />
+                  <div>
+                    <Typography.Text type="secondary">
+                      {he.packAppsInPack} · {apps.length}
+                    </Typography.Text>
+                    <VirtualList
+                      items={rows}
+                      rowHeight={56}
+                      height={420}
+                      itemKey={(it) => it.value}
+                      renderRow={(it) => (
+                        <div className="virtual-list-row-inner">
+                          <AppIdentity bundleId={it.value} meta={get(it.value)} size={40} />
+                          <Button
+                            type="link"
+                            danger
+                            size="small"
+                            loading={
+                              removeItem.isPending && removeItem.variables?.value === it.value
                             }
-                            title={app?.app_name || it.value}
-                            description={app?.developer || it.value}
-                          />
-                        </List.Item>
-                      )
-                    }}
-                  />
+                            onClick={() => removeItem.mutate({ itemKind: 'app', value: it.value })}
+                          >
+                            {he.removeOverride}
+                          </Button>
+                        </div>
+                      )}
+                    />
+                  </div>
                 )}
               </SearchableCollection>
             ) : (

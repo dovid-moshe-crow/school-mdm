@@ -54,6 +54,13 @@ var Essentials = []string{
 	"com.kfilter.portal", // KFilter companion — request portal + push
 }
 
+// SystemDefaults are built-in apps/services that every supervised device needs.
+// Additional Apple system bundle IDs are stored in system_allowlist.
+var SystemDefaults = []string{
+	"com.apple.preferences",
+	"com.apple.mobilephone",
+}
+
 // Applies reports whether target applies to enrollmentID given its group memberships.
 func (t Target) Applies(enrollmentID string, groupIDs []string) bool {
 	switch t.Type {

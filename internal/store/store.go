@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/policy"
@@ -103,9 +106,9 @@ type WhitelistPack struct {
 
 // WhitelistPackItem is one app or URL inside a pack.
 type WhitelistPackItem struct {
-	PackID string     `json:"pack_id"`
+	PackID string      `json:"pack_id"`
 	Kind   policy.Kind `json:"kind"`
-	Value  string     `json:"value"`
+	Value  string      `json:"value"`
 }
 
 // WhitelistPackAssignment attaches a pack to global / device-group / device.
@@ -113,6 +116,65 @@ type WhitelistPackAssignment struct {
 	PackID     string            `json:"pack_id"`
 	TargetType policy.TargetType `json:"target_type"`
 	TargetID   string            `json:"target_id"`
+}
+
+// CustomProfile is an uploaded Apple configuration profile (.mobileconfig).
+type CustomProfile struct {
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	Description        string    `json:"description"`
+	Filename           string    `json:"filename"`
+	PayloadIdentifier  string    `json:"payload_identifier"`
+	PayloadUUID        string    `json:"payload_uuid"`
+	PayloadDisplayName string    `json:"payload_display_name"`
+	PayloadType        string    `json:"payload_type"`
+	SizeBytes          int       `json:"size_bytes"`
+	AssignmentCount    int       `json:"assignment_count,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	Payload            []byte    `json:"-"`
+}
+
+// CustomProfileAssignment attaches a custom profile to global / group / device.
+type CustomProfileAssignment struct {
+	ProfileID  string            `json:"profile_id"`
+	TargetType policy.TargetType `json:"target_type"`
+	TargetID   string            `json:"target_id"`
+}
+
+// SystemAllowlistItem is a built-in Apple/system app applied to every device.
+type SystemAllowlistItem struct {
+	Kind    policy.Kind `json:"kind"`
+	Value   string      `json:"value"`
+	Enabled bool        `json:"enabled"`
+}
+
+const (
+	TimerActionAdd    = "add"
+	TimerActionRemove = "remove"
+	TimerOnce         = "once"
+	TimerWeekly       = "weekly"
+)
+
+// PolicyTimer adds or removes whitelist packs and/or custom profiles on
+// devices/groups on a schedule (Israel local time for weekly clocks).
+type PolicyTimer struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Action     string     `json:"action"`
+	PackIDs    []string   `json:"pack_ids"`
+	ProfileIDs []string   `json:"profile_ids"`
+	DeviceIDs  []string   `json:"device_ids"`
+	GroupIDs   []string   `json:"group_ids"`
+	Schedule   string     `json:"schedule"`
+	RunAt      *time.Time `json:"run_at,omitempty"`
+	Weekdays   []int      `json:"weekdays,omitempty"`
+	TimeOfDay  string     `json:"time_of_day,omitempty"`
+	Enabled    bool       `json:"enabled"`
+	LastRunAt  *time.Time `json:"last_run_at,omitempty"`
+	LastRunKey string     `json:"last_run_key,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // Device is an enrollment with optional display name and policy mode.
@@ -217,13 +279,13 @@ type AccessRequest = Request
 type LedgerReason string
 
 const (
-	LedgerPurchase         LedgerReason = "purchase"
-	LedgerSpend            LedgerReason = "spend"
-	LedgerRefund           LedgerReason = "refund"
-	LedgerGift             LedgerReason = "gift"
-	LedgerAdjust           LedgerReason = "adjust"
-	LedgerAllotment        LedgerReason = "allotment"
-	LedgerAllotmentExpire  LedgerReason = "allotment_expire"
+	LedgerPurchase        LedgerReason = "purchase"
+	LedgerSpend           LedgerReason = "spend"
+	LedgerRefund          LedgerReason = "refund"
+	LedgerGift            LedgerReason = "gift"
+	LedgerAdjust          LedgerReason = "adjust"
+	LedgerAllotment       LedgerReason = "allotment"
+	LedgerAllotmentExpire LedgerReason = "allotment_expire"
 )
 
 // AllotmentInterval is how often a rule refreshes period credits.
@@ -239,9 +301,9 @@ const (
 type AllotmentTargetType string
 
 const (
-	AllotmentEveryone    AllotmentTargetType = "everyone"
-	AllotmentGroup       AllotmentTargetType = "group"
-	AllotmentIndividual  AllotmentTargetType = "individual"
+	AllotmentEveryone   AllotmentTargetType = "everyone"
+	AllotmentGroup      AllotmentTargetType = "group"
+	AllotmentIndividual AllotmentTargetType = "individual"
 )
 
 // PurchaseStatus is the lifecycle of a credit purchase.
@@ -267,10 +329,10 @@ const (
 // the current period allotment (resets each period, never stacks). Available()
 // is what the portal shows and what spend checks against.
 type DeviceCredits struct {
-	EnrollmentID      string    `json:"enrollment_id"`
-	Balance           int       `json:"balance"`
-	AllotmentBalance  int       `json:"allotment_balance"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	EnrollmentID     string    `json:"enrollment_id"`
+	Balance          int       `json:"balance"`
+	AllotmentBalance int       `json:"allotment_balance"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // Available is permanent + period allotment.
@@ -316,11 +378,11 @@ type ApplyAllotmentInput struct {
 
 // ApplyAllotmentResult is returned after attempting a period grant.
 type ApplyAllotmentResult struct {
-	Applied  bool
-	Credits  DeviceCredits
-	Expired  int // clawed back from prior period(s) of this rule
-	Granted  int
-	Entry    *CreditLedgerEntry // allotment grant entry when Applied
+	Applied bool
+	Credits DeviceCredits
+	Expired int // clawed back from prior period(s) of this rule
+	Granted int
+	Entry   *CreditLedgerEntry // allotment grant entry when Applied
 }
 
 // CreditLedgerEntry is one immutable balance change.
@@ -355,18 +417,18 @@ type CreditSettings struct {
 
 // MDMSettings is the singleton ABM/DEP configuration for this school server.
 type MDMSettings struct {
-	DepName             string     `json:"dep_name"`
-	DEPProfileUUID      string     `json:"dep_profile_uuid,omitempty"`
-	CompanionBundleID   string     `json:"companion_bundle_id"`
-	CompanionITunesID   int64      `json:"companion_itunes_id"`
-	CompanionEnabled    bool       `json:"companion_enabled"`
-	LockScreenEnabled   bool       `json:"lock_screen_enabled"`
-	LockScreenFootnote  string     `json:"lock_screen_footnote"`
-	HasVPPToken         bool       `json:"has_vpp_token"`
-	VPPTokenFilename    string     `json:"vpp_token_filename,omitempty"`
-	VPPTokenUpdatedAt   *time.Time `json:"vpp_token_updated_at,omitempty"`
-	VPPToken            []byte     `json:"-"` // content token bytes; never serialize to clients
-	UpdatedAt           time.Time  `json:"updated_at"`
+	DepName            string     `json:"dep_name"`
+	DEPProfileUUID     string     `json:"dep_profile_uuid,omitempty"`
+	CompanionBundleID  string     `json:"companion_bundle_id"`
+	CompanionITunesID  int64      `json:"companion_itunes_id"`
+	CompanionEnabled   bool       `json:"companion_enabled"`
+	LockScreenEnabled  bool       `json:"lock_screen_enabled"`
+	LockScreenFootnote string     `json:"lock_screen_footnote"`
+	HasVPPToken        bool       `json:"has_vpp_token"`
+	VPPTokenFilename   string     `json:"vpp_token_filename,omitempty"`
+	VPPTokenUpdatedAt  *time.Time `json:"vpp_token_updated_at,omitempty"`
+	VPPToken           []byte     `json:"-"` // content token bytes; never serialize to clients
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // ABMDeviceCache is the last synced Apple DEP device list for Admin.
@@ -453,6 +515,24 @@ type Store interface {
 	// ListAllowlistFromPacks returns synthetic allowlist entries from packs that apply
 	// to the given device (global + its groups + device assignments).
 	ListAllowlistFromPacks(ctx context.Context, enrollmentID string, groupIDs []string) ([]policy.Entry, error)
+
+	ListCustomProfiles(ctx context.Context) ([]CustomProfile, error)
+	GetCustomProfile(ctx context.Context, id string) (CustomProfile, error)
+	GetCustomProfilePayload(ctx context.Context, id string) ([]byte, error)
+	CreateCustomProfile(ctx context.Context, p CustomProfile) (CustomProfile, error)
+	UpdateCustomProfile(ctx context.Context, p CustomProfile) (CustomProfile, error)
+	ReplaceCustomProfilePayload(ctx context.Context, id string, payload []byte, filename string) (CustomProfile, error)
+	DeleteCustomProfile(ctx context.Context, id string) error
+	ListCustomProfileAssignments(ctx context.Context, profileID string) ([]CustomProfileAssignment, error)
+	SetCustomProfileAssignment(ctx context.Context, a CustomProfileAssignment) error
+	RemoveCustomProfileAssignment(ctx context.Context, profileID string, target policy.Target) error
+	// ListCustomProfilesForDevice returns assigned custom profiles (with payload) for a device.
+	ListCustomProfilesForDevice(ctx context.Context, enrollmentID string, groupIDs []string) ([]CustomProfile, error)
+
+	ListSystemAllowlist(ctx context.Context) ([]SystemAllowlistItem, error)
+	UpsertSystemAllowlist(ctx context.Context, item SystemAllowlistItem) error
+	SetSystemAllowlistEnabled(ctx context.Context, kind policy.Kind, value string, enabled bool) error
+	DeleteSystemAllowlist(ctx context.Context, kind policy.Kind, value string) error
 
 	ListGrants(ctx context.Context) ([]policy.Grant, error)
 	AddGrant(ctx context.Context, grant policy.Grant) error
@@ -547,4 +627,136 @@ type Store interface {
 	DeleteWebhookEndpoint(ctx context.Context, id string) error
 	InsertWebhookDelivery(ctx context.Context, d WebhookDelivery) (WebhookDelivery, error)
 	ListWebhookDeliveries(ctx context.Context, endpointID string, limit int) ([]WebhookDelivery, error)
+
+	ListPolicyTimers(ctx context.Context) ([]PolicyTimer, error)
+	GetPolicyTimer(ctx context.Context, id string) (PolicyTimer, error)
+	CreatePolicyTimer(ctx context.Context, t PolicyTimer) (PolicyTimer, error)
+	UpdatePolicyTimer(ctx context.Context, t PolicyTimer) (PolicyTimer, error)
+	DeletePolicyTimer(ctx context.Context, id string) error
+	TouchPolicyTimerRun(ctx context.Context, id string, at time.Time, runKey string, enabled bool) error
+}
+
+// NormalizePolicyTimer trims IDs, canonicalizes action/schedule/time, and validates.
+func NormalizePolicyTimer(t *PolicyTimer) error {
+	if t == nil {
+		return fmt.Errorf("timer is required")
+	}
+	t.Name = strings.TrimSpace(t.Name)
+	t.Action = strings.ToLower(strings.TrimSpace(t.Action))
+	t.Schedule = strings.ToLower(strings.TrimSpace(t.Schedule))
+	t.PackIDs = uniqueTrimmedStrings(t.PackIDs)
+	t.ProfileIDs = uniqueTrimmedStrings(t.ProfileIDs)
+	t.DeviceIDs = uniqueTrimmedStrings(t.DeviceIDs)
+	t.GroupIDs = uniqueTrimmedStrings(t.GroupIDs)
+	t.Weekdays = uniqueWeekdays(t.Weekdays)
+	t.LastRunKey = strings.TrimSpace(t.LastRunKey)
+	if strings.TrimSpace(t.TimeOfDay) != "" {
+		h, m, err := ParseTimerTimeOfDay(t.TimeOfDay)
+		if err != nil {
+			return err
+		}
+		t.TimeOfDay = fmt.Sprintf("%02d:%02d", h, m)
+	} else {
+		t.TimeOfDay = ""
+	}
+	if t.RunAt != nil {
+		u := t.RunAt.UTC()
+		t.RunAt = &u
+	}
+	return ValidatePolicyTimer(*t)
+}
+
+// ParseTimerTimeOfDay accepts HH:MM or H:MM (optional seconds).
+func ParseTimerTimeOfDay(s string) (hour, min int, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, fmt.Errorf("time_of_day is required")
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, 0, fmt.Errorf("time_of_day must be HH:MM")
+	}
+	hour, err = strconv.Atoi(parts[0])
+	if err != nil || hour < 0 || hour > 23 {
+		return 0, 0, fmt.Errorf("time_of_day hour must be 0-23")
+	}
+	min, err = strconv.Atoi(parts[1])
+	if err != nil || min < 0 || min > 59 {
+		return 0, 0, fmt.Errorf("time_of_day minute must be 0-59")
+	}
+	return hour, min, nil
+}
+
+// ValidatePolicyTimer checks required fields after normalization.
+func ValidatePolicyTimer(t PolicyTimer) error {
+	if strings.TrimSpace(t.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	switch t.Action {
+	case TimerActionAdd, TimerActionRemove:
+	default:
+		return fmt.Errorf("action must be add or remove")
+	}
+	if len(t.PackIDs) == 0 && len(t.ProfileIDs) == 0 {
+		return fmt.Errorf("at least one pack or profile is required")
+	}
+	if len(t.DeviceIDs) == 0 && len(t.GroupIDs) == 0 {
+		return fmt.Errorf("at least one device or group is required")
+	}
+	switch t.Schedule {
+	case TimerOnce:
+		if t.RunAt == nil || t.RunAt.IsZero() {
+			return fmt.Errorf("run_at is required for a one-time timer")
+		}
+	case TimerWeekly:
+		if len(t.Weekdays) == 0 {
+			return fmt.Errorf("at least one weekday is required")
+		}
+		if _, _, err := ParseTimerTimeOfDay(t.TimeOfDay); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("schedule must be once or weekly")
+	}
+	return nil
+}
+
+func uniqueTrimmedStrings(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func uniqueWeekdays(in []int) []int {
+	seen := map[int]struct{}{}
+	out := make([]int, 0, len(in))
+	for _, d := range in {
+		if d < 0 || d > 6 {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
 }

@@ -235,7 +235,8 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.auditAction(r, actionAllowlistAdd, map[string]any{
-			"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+			"kind": kind, "value": value, "app_name": a.appDisplayName(r, kind, value),
+			"target_type": target.Type, "target_id": target.ID,
 		})
 	} else {
 		if err := a.Store.AddGrant(r.Context(), policy.Grant{
@@ -245,7 +246,8 @@ func (a *API) handleCreateAllowance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.auditAction(r, actionAllowlistAdd, map[string]any{
-			"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+			"kind": kind, "value": value, "app_name": a.appDisplayName(r, kind, value),
+			"target_type": target.Type, "target_id": target.ID,
 		})
 	}
 	if kind == policy.KindApp && a.Catalog != nil {
@@ -386,7 +388,8 @@ func (a *API) handleDeleteAllowance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.auditAction(r, actionAllowlistRemove, map[string]any{
-		"kind": kind, "value": value, "target_type": target.Type, "target_id": target.ID,
+		"kind": kind, "value": value, "app_name": a.appDisplayName(r, kind, value),
+		"target_type": target.Type, "target_id": target.ID,
 	})
 	enqueueErr := a.reconcileAllowanceTarget(r, target)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enqueue_error": enqueueErr})

@@ -3,6 +3,7 @@ import { App as AntApp, ConfigProvider } from 'antd'
 import heIL from 'antd/locale/he_IL'
 import { Route, Routes } from 'react-router-dom'
 import { theme } from './theme'
+import { AdminAuthProvider, RequireAdmin } from './auth'
 import Home from './pages/Home'
 import Portal from './pages/Portal'
 import Admin from './pages/Admin'
@@ -16,18 +17,41 @@ export default function App() {
   return (
     <ConfigProvider direction="rtl" locale={heIL} theme={theme}>
       <AntApp>
-        <Suspense fallback={null}>
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/privacy" element={<Privacy />} />
-            <Route path="/support" element={<Support />} />
-            <Route path="/d/:deviceId" element={<Portal />} />
-            <Route path="/d/:deviceId/store" element={<Portal />} />
-            <Route path="/admin" element={<Admin />} />
-            <Route path="/admin/devices/:deviceId" element={<DeviceAdmin />} />
-            <Route path="/api-docs" element={<ApiDocs />} />
-          </Routes>
-        </Suspense>
+        <AdminAuthProvider>
+          <Suspense fallback={null}>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/privacy" element={<Privacy />} />
+              <Route path="/support" element={<Support />} />
+              <Route path="/d/:deviceId" element={<Portal />} />
+              <Route path="/d/:deviceId/store" element={<Portal />} />
+              <Route
+                path="/admin"
+                element={
+                  <RequireAdmin>
+                    <Admin />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="/admin/devices/:deviceId"
+                element={
+                  <RequireAdmin>
+                    <DeviceAdmin />
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="/api-docs"
+                element={
+                  <RequireAdmin>
+                    <ApiDocs />
+                  </RequireAdmin>
+                }
+              />
+            </Routes>
+          </Suspense>
+        </AdminAuthProvider>
       </AntApp>
     </ConfigProvider>
   )

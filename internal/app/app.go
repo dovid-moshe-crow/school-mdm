@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dwdmsh/school-mdm/internal/abm"
+	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/approvals"
 	"github.com/dwdmsh/school-mdm/internal/config"
@@ -23,12 +24,12 @@ import (
 	"github.com/dwdmsh/school-mdm/internal/mdmhub"
 	"github.com/dwdmsh/school-mdm/internal/mdmstore"
 	mdmstorepg "github.com/dwdmsh/school-mdm/internal/mdmstore/postgres"
-	"github.com/dwdmsh/school-mdm/internal/activity"
 	"github.com/dwdmsh/school-mdm/internal/nedarim"
 	"github.com/dwdmsh/school-mdm/internal/notify"
 	"github.com/dwdmsh/school-mdm/internal/store"
 	"github.com/dwdmsh/school-mdm/internal/store/memory"
 	"github.com/dwdmsh/school-mdm/internal/store/postgres"
+	"github.com/dwdmsh/school-mdm/internal/timers"
 	"github.com/dwdmsh/school-mdm/internal/webhooks"
 )
 
@@ -49,6 +50,7 @@ type App struct {
 	DepHTTP  http.Handler
 	Activity *activity.Logger
 	Webhooks *webhooks.Service
+	Timers   *timers.Service
 	closers  []func()
 }
 
@@ -218,6 +220,14 @@ func New(ctx context.Context) (*App, error) {
 		"access_cost", accessCost,
 	)
 
+	timerSvc := &timers.Service{
+		Store:    st,
+		Push:     push,
+		Activity: actLog,
+		Loc:      timers.Location(),
+		Log:      log,
+	}
+
 	return &App{
 		Cfg:      cfg,
 		Log:      log,
@@ -234,6 +244,7 @@ func New(ctx context.Context) (*App, error) {
 		DepHTTP:  depHTTP,
 		Activity: actLog,
 		Webhooks: hookSvc,
+		Timers:   timerSvc,
 		closers:  closers,
 	}, nil
 }
@@ -264,6 +275,7 @@ func (a *App) Handler() http.Handler {
 		ABM:      a.ABM,
 		Activity: a.Activity,
 		Webhooks: a.Webhooks,
+		Timers:   a.Timers,
 		Log:      a.Log,
 	}
 	if a.Service != nil {
@@ -280,6 +292,9 @@ func (a *App) Handler() http.Handler {
 // Run listens until ctx is done.
 func (a *App) Run(ctx context.Context) error {
 	go a.Credits.StartAllotmentTicker(ctx, 2*time.Minute, a.Log)
+	if a.Timers != nil {
+		go a.Timers.StartTicker(ctx, time.Minute, a.Log)
+	}
 	if a.Cfg.MDMLive() && a.Push != nil {
 		go func() {
 			// TODO(school-mdm): Startup reconcile-all is a blunt hammer — it re-pushes

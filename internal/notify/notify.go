@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dwdmsh/school-mdm/internal/appmeta"
 	"github.com/dwdmsh/school-mdm/internal/store"
 )
 
@@ -109,17 +110,18 @@ func (s *Service) sendExpo(ctx context.Context, messages []map[string]any) error
 // RequestDecided notifies the student about approve/deny/resolve.
 func (s *Service) RequestDecided(ctx context.Context, enrollmentID, status, value string) {
 	title := "עדכון בקשה"
+	label := displayValue(ctx, s.Store, value)
 	body := "הבקשה שלך עודכנה"
 	switch status {
 	case string(store.StatusApproved):
 		title = "הבקשה אושרה"
-		body = "אושר: " + truncate(value, 80)
+		body = "אושר: " + truncate(label, 80)
 	case string(store.StatusDenied):
 		title = "הבקשה נדחתה"
-		body = "נדחה: " + truncate(value, 80)
+		body = "נדחה: " + truncate(label, 80)
 	case string(store.StatusResolved):
 		title = "הפנייה טופלה"
-		body = truncate(value, 80)
+		body = truncate(label, 80)
 	}
 	s.NotifyEnrollment(ctx, Message{
 		EnrollmentID: enrollmentID,
@@ -165,4 +167,20 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+func displayValue(ctx context.Context, st store.Store, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	if n, ok := appmeta.KnownName(value); ok {
+		return n
+	}
+	if st != nil {
+		if meta, err := st.GetAppMeta(ctx, value); err == nil && strings.TrimSpace(meta.Name) != "" {
+			return meta.Name
+		}
+	}
+	return value
 }

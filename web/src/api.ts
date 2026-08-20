@@ -147,6 +147,9 @@ export type AbmDeviceSync = {
   more_to_follow?: boolean
   synced_at?: string
   cached?: boolean
+  assigned?: number
+  needed?: number
+  assign_error?: string
 }
 
 export type Allowance = {
@@ -157,8 +160,16 @@ export type Allowance = {
   target_id?: string
   enrollment_id?: string
   group_id?: string
+  pack_id?: string
+  pack_name?: string
   expires_at?: string
   app?: AppMeta
+}
+
+export type SystemAllowlistItem = {
+  kind: string
+  value: string
+  enabled: boolean
 }
 
 export type WhitelistPack = {
@@ -181,14 +192,75 @@ export type WhitelistPackAssignment = {
   target_id: string
 }
 
+export type CustomProfile = {
+  id: string
+  name: string
+  description: string
+  filename: string
+  payload_identifier: string
+  payload_uuid: string
+  payload_display_name: string
+  payload_type: string
+  size_bytes: number
+  assignment_count?: number
+  created_at: string
+  updated_at: string
+}
+
+export type CustomProfileAssignment = {
+  profile_id: string
+  target_type: string
+  target_id: string
+}
+
+export type PolicyTimer = {
+  id: string
+  name: string
+  action: 'add' | 'remove' | string
+  pack_ids: string[]
+  profile_ids: string[]
+  device_ids: string[]
+  group_ids: string[]
+  schedule: 'once' | 'weekly' | string
+  run_at?: string
+  weekdays?: number[]
+  time_of_day?: string
+  enabled: boolean
+  last_run_at?: string
+  last_run_key?: string
+  created_at: string
+  updated_at: string
+  next_run_at?: string
+}
+
+export type PolicyTimerWrite = {
+  name: string
+  action: 'add' | 'remove'
+  pack_ids: string[]
+  profile_ids: string[]
+  device_ids: string[]
+  group_ids: string[]
+  schedule: 'once' | 'weekly'
+  run_at?: string
+  weekdays?: number[]
+  time_of_day?: string
+  enabled?: boolean
+}
+
+export type PolicyTimerApplyResult = {
+  timer_id: string
+  action: string
+  assignments: number
+  errors: number
+  devices: number
+}
+
 async function json<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     const raw = (data as { error?: string }).error || res.statusText || 'שגיאה'
     if (/admin authorization required/i.test(raw)) {
-      throw new Error(
-        'נדרש אסימון ניהול. בהגדרות שמרו את האסימון (מקומי: dev-admin-token).',
-      )
+      throw new Error('נדרשת התחברות לממשק הניהול.')
     }
     throw new Error(raw)
   }
@@ -231,6 +303,26 @@ function adminHeaders(extra?: HeadersInit): HeadersInit {
   }
 }
 
+function req(url: string, init: RequestInit = {}) {
+  return fetch(url, {
+    ...init,
+    credentials: 'include',
+    headers: adminHeaders(init.headers),
+  })
+}
+
+export type AdminAuthUser = {
+  email: string
+  name: string
+  method: 'google' | 'token'
+}
+
+export type AdminAuthConfig = {
+  google: boolean
+  token_login: boolean
+  hosted_domain?: string
+}
+
 export type MdmEnrollment = {
   id: string
   device_id: string
@@ -263,83 +355,109 @@ export type MdmCommandResult = {
 }
 
 export const api = {
+  authConfig() {
+    return req('/api/auth/config').then((r) => json<AdminAuthConfig>(r))
+  },
+  async authMe(): Promise<AdminAuthUser | null> {
+    const r = await req('/api/auth/me')
+    if (r.status === 401) return null
+    return json<AdminAuthUser>(r)
+  },
+  authLogout() {
+    return req('/api/auth/logout', { method: 'POST' }).then((r) => json<{ ok: boolean }>(r))
+  },
   searchApps(q: string, enrollmentID?: string) {
     const p = new URLSearchParams({ q })
     if (enrollmentID) p.set('enrollment_id', enrollmentID)
-    return fetch(`/api/apps/search?${p}`).then((r) => json<AppMeta[]>(r))
+    return req(`/api/apps/search?${p}`).then((r) => json<AppMeta[]>(r))
   },
   lookupApp(bundleID: string, opts?: { refresh?: boolean; enrollmentID?: string }) {
     const p = new URLSearchParams()
     if (opts?.refresh) p.set('full', '1')
     if (opts?.enrollmentID) p.set('enrollment_id', opts.enrollmentID)
     const q = p.toString()
-    return fetch(`/api/apps/${encodeURIComponent(bundleID)}${q ? `?${q}` : ''}`).then((r) =>
+    return req(`/api/apps/${encodeURIComponent(bundleID)}${q ? `?${q}` : ''}`).then((r) =>
       json<AppMeta>(r),
     )
   },
+  lookupApps(ids: string[], opts?: { remote?: boolean }) {
+    const clean = [...new Set(ids.map((s) => s.trim()).filter(Boolean))]
+    const out: AppMeta[] = []
+    const run = async () => {
+      for (let i = 0; i < clean.length; i += 80) {
+        const chunk = clean.slice(i, i + 80)
+        const p = new URLSearchParams()
+        for (const id of chunk) p.append('id', id)
+        if (opts?.remote === false) p.set('fetch', '0')
+        out.push(...(await req(`/api/apps/lookup?${p}`).then((r) => json<AppMeta[]>(r))))
+      }
+      return out
+    }
+    return run()
+  },
   accessStatus(enrollmentID: string, kind: string, value: string) {
     const p = new URLSearchParams({ enrollment_id: enrollmentID, kind, value })
-    return fetch(`/api/access-status?${p}`).then((r) => json<{ status: AccessStatus }>(r))
+    return req(`/api/access-status?${p}`).then((r) => json<{ status: AccessStatus }>(r))
   },
   createRequest(body: Record<string, string>) {
-    return fetch('/api/requests', {
+    return req('/api/requests', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<Request>(r))
   },
   myRequests(enrollmentID: string) {
-    return fetch(`/api/device/${encodeURIComponent(enrollmentID)}/requests`).then((r) =>
+    return req(`/api/device/${encodeURIComponent(enrollmentID)}/requests`).then((r) =>
       json<Request[]>(r),
     )
   },
   getRequest(id: string) {
-    return fetch(`/api/requests/${id}`).then((r) => json<Request>(r))
+    return req(`/api/requests/${id}`).then((r) => json<Request>(r))
   },
   messages(id: string, enrollmentID?: string) {
     const p = new URLSearchParams()
     if (enrollmentID) p.set('enrollment_id', enrollmentID)
     const q = p.toString()
-    return fetch(`/api/requests/${id}/messages${q ? `?${q}` : ''}`).then((r) =>
+    return req(`/api/requests/${id}/messages${q ? `?${q}` : ''}`).then((r) =>
       json<RequestMessage[]>(r),
     )
   },
   postAdminMessage(id: string, body: string) {
-    return fetch(`/api/requests/${id}/messages`, {
+    return req(`/api/requests/${id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ body }),
     }).then((r) => json<RequestMessage>(r))
   },
   postStudentMessage(deviceID: string, id: string, body: string) {
-    return fetch(`/api/device/${encodeURIComponent(deviceID)}/requests/${id}/messages`, {
+    return req(`/api/device/${encodeURIComponent(deviceID)}/requests/${id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ body }),
     }).then((r) => json<RequestMessage>(r))
   },
   requests(params: URLSearchParams) {
-    return fetch(`/api/requests?${params}`).then((r) => json<Request[]>(r))
+    return req(`/api/requests?${params}`).then((r) => json<Request[]>(r))
   },
   decide(id: string, approve: boolean, body: Record<string, string>) {
-    return fetch(`/api/requests/${id}/${approve ? 'approve' : 'deny'}`, {
+    return req(`/api/requests/${id}/${approve ? 'approve' : 'deny'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<Request>(r))
   },
   packs() {
-    return fetch('/api/packs').then((r) => json<WhitelistPack[]>(r))
+    return req('/api/packs').then((r) => json<WhitelistPack[]>(r))
   },
   createPack(name: string, description = '') {
-    return fetch('/api/packs', {
+    return req('/api/packs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, description }),
     }).then((r) => json<WhitelistPack>(r))
   },
   getPack(id: string) {
-    return fetch(`/api/packs/${encodeURIComponent(id)}`).then((r) =>
+    return req(`/api/packs/${encodeURIComponent(id)}`).then((r) =>
       json<{
         pack: WhitelistPack
         items: WhitelistPackItem[]
@@ -348,12 +466,32 @@ export const api = {
     )
   },
   deletePack(id: string) {
-    return fetch(`/api/packs/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) =>
+    return req(`/api/packs/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) =>
       json<{ ok: string }>(r),
     )
   },
+  systemAllowlist() {
+    return req('/api/system-allowlist', { headers: adminHeaders() }).then((r) =>
+      json<SystemAllowlistItem[]>(r),
+    )
+  },
+  setSystemAllowlistEnabled(kind: string, value: string, enabled: boolean) {
+    const p = new URLSearchParams({ kind, value })
+    return req(`/api/system-allowlist?${p}`, {
+      method: 'PATCH',
+      headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ enabled }),
+    }).then((r) => json<{ ok: boolean }>(r))
+  },
+  addSystemAllowlist(value: string, kind = 'app') {
+    return req('/api/system-allowlist', {
+      method: 'POST',
+      headers: adminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ kind, value, enabled: true }),
+    }).then((r) => json<SystemAllowlistItem>(r))
+  },
   addPackItem(id: string, kind: string, value: string) {
-    return fetch(`/api/packs/${encodeURIComponent(id)}/items`, {
+    return req(`/api/packs/${encodeURIComponent(id)}/items`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind, value }),
@@ -361,7 +499,7 @@ export const api = {
   },
   removePackItem(id: string, kind: string, value: string) {
     const p = new URLSearchParams({ kind, value })
-    return fetch(`/api/packs/${encodeURIComponent(id)}/items?${p}`, { method: 'DELETE' }).then(
+    return req(`/api/packs/${encodeURIComponent(id)}/items?${p}`, { method: 'DELETE' }).then(
       (r) => json<{ ok: string }>(r),
     )
   },
@@ -369,7 +507,7 @@ export const api = {
     id: string,
     body: { scope: string; group_id?: string; enrollment_id?: string },
   ) {
-    return fetch(`/api/packs/${encodeURIComponent(id)}/assignments`, {
+    return req(`/api/packs/${encodeURIComponent(id)}/assignments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -377,22 +515,127 @@ export const api = {
   },
   removePackAssignment(id: string, targetType: string, targetId: string) {
     const p = new URLSearchParams({ target_type: targetType, target_id: targetId })
-    return fetch(`/api/packs/${encodeURIComponent(id)}/assignments?${p}`, {
+    return req(`/api/packs/${encodeURIComponent(id)}/assignments?${p}`, {
       method: 'DELETE',
     }).then((r) => json<{ ok: string }>(r))
   },
+  profiles(enrollmentId?: string) {
+    const q = enrollmentId ? `?enrollment_id=${encodeURIComponent(enrollmentId)}` : ''
+    return req(`/api/profiles${q}`).then((r) => json<CustomProfile[]>(r))
+  },
+  createProfile(file: File, name = '', description = '') {
+    const body = new FormData()
+    body.append('file', file)
+    if (name) body.append('name', name)
+    if (description) body.append('description', description)
+    return req('/api/profiles', {
+      method: 'POST',
+      headers: adminHeaders(),
+      body,
+    }).then((r) => json<CustomProfile>(r))
+  },
+  getProfile(id: string) {
+    return req(`/api/profiles/${encodeURIComponent(id)}`).then((r) =>
+      json<{
+        profile: CustomProfile
+        assignments: CustomProfileAssignment[]
+      }>(r),
+    )
+  },
+  updateProfile(id: string, body: { name: string; description?: string }) {
+    return req(`/api/profiles/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<CustomProfile>(r))
+  },
+  replaceProfilePayload(id: string, file: File) {
+    const body = new FormData()
+    body.append('file', file)
+    return req(`/api/profiles/${encodeURIComponent(id)}/payload`, {
+      method: 'PUT',
+      headers: adminHeaders(),
+      body,
+    }).then((r) => json<CustomProfile>(r))
+  },
+  deleteProfile(id: string) {
+    return req(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) =>
+      json<{ ok: string }>(r),
+    )
+  },
+  async downloadProfile(id: string, filename: string) {
+    const res = await req(`/api/profiles/${encodeURIComponent(id)}/file`)
+    if (!res.ok) {
+      await json(res)
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || 'profile.mobileconfig'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
+  addProfileAssignment(
+    id: string,
+    body: { scope: string; group_id?: string; enrollment_id?: string },
+  ) {
+    return req(`/api/profiles/${encodeURIComponent(id)}/assignments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<{ ok: string }>(r))
+  },
+  removeProfileAssignment(id: string, targetType: string, targetId: string) {
+    const p = new URLSearchParams({ target_type: targetType, target_id: targetId })
+    return req(`/api/profiles/${encodeURIComponent(id)}/assignments?${p}`, {
+      method: 'DELETE',
+    }).then((r) => json<{ ok: string }>(r))
+  },
+  timers() {
+    return req('/api/timers', { headers: adminHeaders() }).then((r) => json<PolicyTimer[]>(r))
+  },
+  createTimer(body: PolicyTimerWrite) {
+    return req('/api/timers', {
+      method: 'POST',
+      headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<PolicyTimer>(r))
+  },
+  updateTimer(id: string, body: Partial<PolicyTimerWrite>) {
+    return req(`/api/timers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => json<PolicyTimer>(r))
+  },
+  deleteTimer(id: string) {
+    return req(`/api/timers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: adminHeaders(),
+    }).then((r) => json<{ ok: boolean }>(r))
+  },
+  runTimer(id: string) {
+    return req(`/api/timers/${encodeURIComponent(id)}/run`, {
+      method: 'POST',
+      headers: adminHeaders(),
+    }).then((r) => json<PolicyTimerApplyResult>(r))
+  },
   devices() {
-    return fetch('/api/devices').then((r) => json<Device[]>(r))
+    return req('/api/devices').then((r) => json<Device[]>(r))
   },
   setDeviceName(id: string, name: string) {
-    return fetch(`/api/devices/${encodeURIComponent(id)}`, {
+    return req(`/api/devices/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     }).then((r) => json<Device>(r))
   },
   setDeviceUnrestricted(id: string, unrestricted: boolean) {
-    return fetch(`/api/devices/${encodeURIComponent(id)}`, {
+    return req(`/api/devices/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ unrestricted }),
@@ -411,45 +654,45 @@ export const api = {
     if (filter.limit != null) q.set('limit', String(filter.limit))
     if (filter.offset != null) q.set('offset', String(filter.offset))
     const qs = q.toString()
-    return fetch(`/api/admin/activity${qs ? `?${qs}` : ''}`, { headers: adminHeaders() }).then(
+    return req(`/api/admin/activity${qs ? `?${qs}` : ''}`, { headers: adminHeaders() }).then(
       (r) => json<{ events: ActivityEvent[]; limit: number; offset: number }>(r),
     )
   },
   groups() {
-    return fetch('/api/groups').then((r) => json<Group[]>(r))
+    return req('/api/groups').then((r) => json<Group[]>(r))
   },
   createGroup(name: string, description: string) {
-    return fetch('/api/groups', {
+    return req('/api/groups', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, description }),
     }).then((r) => json<Group>(r))
   },
   updateGroup(id: string, name: string, description: string) {
-    return fetch(`/api/groups/${id}`, {
+    return req(`/api/groups/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, description }),
     }).then((r) => json<Group>(r))
   },
   deleteGroup(id: string) {
-    return fetch(`/api/groups/${id}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
+    return req(`/api/groups/${id}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
   },
   members(id: string) {
-    return fetch(`/api/groups/${id}/members`).then((r) => json<string[]>(r))
+    return req(`/api/groups/${id}/members`).then((r) => json<string[]>(r))
   },
   setMembers(id: string, enrollment_ids: string[]) {
-    return fetch(`/api/groups/${id}/members`, {
+    return req(`/api/groups/${id}/members`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_ids }),
     }).then((r) => json<string[]>(r))
   },
   allowances(params: URLSearchParams) {
-    return fetch(`/api/allowances?${params}`).then((r) => json<Allowance[]>(r))
+    return req(`/api/allowances?${params}`).then((r) => json<Allowance[]>(r))
   },
   createAllowance(body: Record<string, string>) {
-    return fetch('/api/allowances', {
+    return req('/api/allowances', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -462,11 +705,11 @@ export const api = {
       target_type: row.target_type || 'global',
       target_id: row.target_id || '',
     })
-    return fetch(`/api/allowances?${p}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
+    return req(`/api/allowances?${p}`, { method: 'DELETE' }).then((r) => json<{ ok: string }>(r))
   },
   creditBalance(enrollmentID: string) {
     const p = new URLSearchParams({ enrollment_id: enrollmentID })
-    return fetch(`/api/credits/balance?${p}`).then((r) =>
+    return req(`/api/credits/balance?${p}`).then((r) =>
       json<{
         enrollment_id: string
         balance: number
@@ -478,15 +721,15 @@ export const api = {
     )
   },
   creditPackages() {
-    return fetch('/api/credits/packages').then((r) => json<CreditPackage[]>(r))
+    return req('/api/credits/packages').then((r) => json<CreditPackage[]>(r))
   },
   creditSettings() {
-    return fetch('/api/credits/settings').then((r) =>
+    return req('/api/credits/settings').then((r) =>
       json<{ access_request_cost: number; enabled: boolean }>(r),
     )
   },
   creditCheckout(enrollmentID: string, packageID: string) {
-    return fetch('/api/credits/checkout', {
+    return req('/api/credits/checkout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_id: enrollmentID, package_id: packageID }),
@@ -501,14 +744,14 @@ export const api = {
     )
   },
   creditConfirm(enrollmentID: string, purchaseID: string) {
-    return fetch('/api/credits/confirm', {
+    return req('/api/credits/confirm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_id: enrollmentID, purchase_id: purchaseID }),
     }).then((r) => json<{ purchase: unknown; balance: number }>(r))
   },
   adminGiftCredits(enrollmentID: string, amount: number, note?: string) {
-    return fetch('/api/admin/credits/gift', {
+    return req('/api/admin/credits/gift', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_id: enrollmentID, amount, note: note || '' }),
@@ -523,7 +766,7 @@ export const api = {
     )
   },
   adminAdjustCredits(enrollmentID: string, amount: number, note?: string) {
-    return fetch('/api/admin/credits/adjust', {
+    return req('/api/admin/credits/adjust', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enrollment_id: enrollmentID, amount, note: note || '' }),
@@ -540,7 +783,7 @@ export const api = {
     )
   },
   adminCredits() {
-    return fetch('/api/admin/credits').then((r) =>
+    return req('/api/admin/credits').then((r) =>
       json<
         {
           enrollment_id: string
@@ -557,7 +800,7 @@ export const api = {
       enrollment_id: enrollmentID,
       ledger_limit: String(ledgerLimit),
     })
-    return fetch(`/api/admin/credits?${p}`).then((r) =>
+    return req(`/api/admin/credits?${p}`).then((r) =>
       json<{
         enrollment_id: string
         balance: number
@@ -569,14 +812,14 @@ export const api = {
     )
   },
   adminCreditSettings() {
-    return fetch('/api/admin/credits/settings').then((r) => json<CreditSettings>(r))
+    return req('/api/admin/credits/settings').then((r) => json<CreditSettings>(r))
   },
   adminUpdateCreditSettings(accessRequestCost: number, enabled?: boolean) {
     const body: { access_request_cost: number; enabled?: boolean } = {
       access_request_cost: accessRequestCost,
     }
     if (enabled !== undefined) body.enabled = enabled
-    return fetch('/api/admin/credits/settings', {
+    return req('/api/admin/credits/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -594,12 +837,12 @@ export const api = {
     if (filter.limit != null) q.set('limit', String(filter.limit))
     if (filter.offset != null) q.set('offset', String(filter.offset))
     const qs = q.toString()
-    return fetch(`/api/admin/credits/purchases${qs ? `?${qs}` : ''}`, {
+    return req(`/api/admin/credits/purchases${qs ? `?${qs}` : ''}`, {
       headers: adminHeaders(),
     }).then((r) => json<{ purchases: CreditPurchase[]; limit: number; offset: number }>(r))
   },
   adminCreditPackages() {
-    return fetch('/api/admin/credits/packages').then((r) => json<CreditPackage[]>(r))
+    return req('/api/admin/credits/packages').then((r) => json<CreditPackage[]>(r))
   },
   adminCreateCreditPackage(pkg: {
     name_he: string
@@ -608,7 +851,7 @@ export const api = {
     active?: boolean
     sort_order?: number
   }) {
-    return fetch('/api/admin/credits/packages', {
+    return req('/api/admin/credits/packages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(pkg),
@@ -624,19 +867,19 @@ export const api = {
       sort_order?: number
     },
   ) {
-    return fetch(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
+    return req(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }).then((r) => json<CreditPackage>(r))
   },
   adminDeactivateCreditPackage(id: string) {
-    return fetch(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
+    return req(`/api/admin/credits/packages/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }).then((r) => json<CreditPackage>(r))
   },
   adminAllotments() {
-    return fetch('/api/admin/credits/allotments').then((r) => json<CreditAllotmentRule[]>(r))
+    return req('/api/admin/credits/allotments').then((r) => json<CreditAllotmentRule[]>(r))
   },
   adminCreateAllotment(rule: {
     name?: string
@@ -647,7 +890,7 @@ export const api = {
     target_id?: string
     enabled?: boolean
   }) {
-    return fetch('/api/admin/credits/allotments', {
+    return req('/api/admin/credits/allotments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(rule),
@@ -665,19 +908,19 @@ export const api = {
       enabled?: boolean
     },
   ) {
-    return fetch(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
+    return req(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }).then((r) => json<CreditAllotmentRule>(r))
   },
   adminDeleteAllotment(id: string) {
-    return fetch(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
+    return req(`/api/admin/credits/allotments/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }).then((r) => json<{ ok: string }>(r))
   },
   adminRunAllotments() {
-    return fetch('/api/admin/credits/allotments/run', { method: 'POST' }).then((r) =>
+    return req('/api/admin/credits/allotments/run', { method: 'POST' }).then((r) =>
       json<{
         rules_processed: number
         grants_applied: number
@@ -687,102 +930,102 @@ export const api = {
     )
   },
   mdmStatus() {
-    return fetch('/api/mdm/status', { headers: adminHeaders() }).then((r) => json<MdmStatus>(r))
+    return req('/api/mdm/status', { headers: adminHeaders() }).then((r) => json<MdmStatus>(r))
   },
   mdmDevices() {
-    return fetch('/api/mdm/devices', { headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/devices', { headers: adminHeaders() }).then((r) =>
       json<MdmEnrollment[]>(r),
     )
   },
   mdmPush(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/push`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/push`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmReconcile(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/reconcile`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/reconcile`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmClearAllowlist(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/clear-allowlist`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/clear-allowlist`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmLock(id: string, body?: { pin?: string; message?: string }) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/lock`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/lock`, {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmClearPasscode(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/clear-passcode`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/clear-passcode`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmRestart(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/restart`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/restart`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmShutDown(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/shutdown`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/shutdown`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmErase(id: string, body?: { pin?: string }) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/erase`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/erase`, {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmEnableLostMode(id: string, body: { message: string; phone?: string; footnote?: string }) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/enable`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/enable`, {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmDisableLostMode(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/disable`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/disable`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmPlayLostModeSound(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/play-sound`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/play-sound`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmDeviceLocation(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/location`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/lost-mode/location`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string; command_uuid: string }>(r))
   },
   mdmSecurityInfo(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/security-info`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/security-info`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string; command_uuid: string }>(r))
   },
   mdmProfileList(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/profile-list`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/profile-list`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string; command_uuid: string }>(r))
   },
   mdmInstalledApps(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/installed-apps`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/installed-apps`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string; command_uuid: string }>(r))
@@ -796,36 +1039,36 @@ export const api = {
     footnote?: string
     group_id?: string
   }) {
-    return fetch('/api/mdm/devices/bulk', {
+    return req('/api/mdm/devices/bulk', {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<{ results: { id: string; ok: boolean; error?: string }[] }>(r))
   },
   effectiveAllowlist(enrollmentId: string) {
-    return fetch(`/api/allowlist?enrollment_id=${encodeURIComponent(enrollmentId)}`).then((r) =>
+    return req(`/api/allowlist?enrollment_id=${encodeURIComponent(enrollmentId)}`).then((r) =>
       json<{ apps: string[]; urls: string[] }>(r),
     )
   },
   abmAccount() {
-    return fetch('/api/mdm/abm/account', { headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/abm/account', { headers: adminHeaders() }).then((r) =>
       json<AbmAccount>(r),
     )
   },
   abmSettings() {
-    return fetch('/api/mdm/abm/settings', { headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/abm/settings', { headers: adminHeaders() }).then((r) =>
       json<MdmSettings>(r),
     )
   },
   abmPutSettings(body: Partial<MdmSettings> & { dep_name?: string }) {
-    return fetch('/api/mdm/abm/settings', {
+    return req('/api/mdm/abm/settings', {
       method: 'PUT',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<MdmSettings>(r))
   },
   uploadVppToken(tokenText: string, filename?: string) {
-    return fetch('/api/mdm/vpp/token', {
+    return req('/api/mdm/vpp/token', {
       method: 'PUT',
       headers: adminHeaders({
         'Content-Type': 'text/plain',
@@ -837,24 +1080,24 @@ export const api = {
     )
   },
   deleteVppToken() {
-    return fetch('/api/mdm/vpp/token', { method: 'DELETE', headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/vpp/token', { method: 'DELETE', headers: adminHeaders() }).then((r) =>
       json<{ ok: boolean; has_vpp_token: boolean }>(r),
     )
   },
   mdmInstallCompanion(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/install-companion`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/install-companion`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmConfigureCompanion(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/configure-companion`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/configure-companion`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string }>(r))
   },
   mdmGetDevice(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}`, { headers: adminHeaders() }).then(
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}`, { headers: adminHeaders() }).then(
       (r) =>
         json<{
           id: string
@@ -866,17 +1109,17 @@ export const api = {
     )
   },
   abmDepNames() {
-    return fetch('/api/mdm/abm/dep-names', { headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/abm/dep-names', { headers: adminHeaders() }).then((r) =>
       json<{ dep_name: string; dep_names: string[] }>(r),
     )
   },
   abmDevices() {
-    return fetch('/api/mdm/abm/devices', { headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/abm/devices', { headers: adminHeaders() }).then((r) =>
       json<AbmDeviceSync>(r),
     )
   },
   abmSync() {
-    return fetch('/api/mdm/abm/sync', { method: 'POST', headers: adminHeaders() }).then((r) =>
+    return req('/api/mdm/abm/sync', { method: 'POST', headers: adminHeaders() }).then((r) =>
       json<AbmDeviceSync>(r),
     )
   },
@@ -884,19 +1127,19 @@ export const api = {
     const q = profileUUID?.trim()
       ? `?profile_uuid=${encodeURIComponent(profileUUID.trim())}`
       : ''
-    return fetch(`/api/mdm/abm/profile${q}`, { headers: adminHeaders() }).then((r) =>
+    return req(`/api/mdm/abm/profile${q}`, { headers: adminHeaders() }).then((r) =>
       json<{ profile_uuid: string; profile: Record<string, unknown> }>(r),
     )
   },
   abmDefineProfile(body: { profile_name: string; url?: string }) {
-    return fetch('/api/mdm/abm/profile', {
+    return req('/api/mdm/abm/profile', {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<{ profile_uuid?: string }>(r))
   },
   abmAssign(profileUUID: string, devices: string[]) {
-    return fetch('/api/mdm/abm/assign', {
+    return req('/api/mdm/abm/assign', {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile_uuid: profileUUID, devices }),
@@ -904,7 +1147,7 @@ export const api = {
   },
   async abmDownloadPublicKey(depName: string) {
     const name = encodeURIComponent(depName || 'nanok')
-    const res = await fetch(`/dep/v1/tokenpki/${name}`, { headers: adminHeaders() })
+    const res = await req(`/dep/v1/tokenpki/${name}`)
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       throw new Error(text || `download cert failed (${res.status})`)
@@ -920,10 +1163,9 @@ export const api = {
   async abmUploadToken(depName: string, file: File) {
     const name = encodeURIComponent(depName || 'nanok')
     const body = await file.arrayBuffer()
-    const res = await fetch(`/dep/v1/tokenpki/${name}`, {
+    const res = await req(`/dep/v1/tokenpki/${name}`, {
       method: 'PUT',
       headers: {
-        ...adminHeaders(),
         'Content-Type': 'application/octet-stream',
       },
       body,
@@ -935,27 +1177,27 @@ export const api = {
     return res.json().catch(() => ({ ok: true }))
   },
   mdmDeviceInformation(id: string) {
-    return fetch(`/api/mdm/devices/${encodeURIComponent(id)}/device-information`, {
+    return req(`/api/mdm/devices/${encodeURIComponent(id)}/device-information`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<{ status: string; command_uuid: string }>(r))
   },
   mdmCommandResult(id: string, commandUUID: string) {
-    return fetch(
+    return req(
       `/api/mdm/devices/${encodeURIComponent(id)}/commands/${encodeURIComponent(commandUUID)}`,
       { headers: adminHeaders() },
     ).then((r) => json<MdmCommandResult>(r))
   },
   openapi() {
-    return fetch('/api/openapi.json').then((r) => json<OpenAPISpec>(r))
+    return req('/api/openapi.json').then((r) => json<OpenAPISpec>(r))
   },
   webhookEvents() {
-    return fetch('/api/webhooks/events').then((r) =>
+    return req('/api/webhooks/events').then((r) =>
       json<{ events: WebhookEventInfo[]; filters: string[] }>(r),
     )
   },
   webhooks() {
-    return fetch('/api/webhooks', { headers: adminHeaders() }).then((r) =>
+    return req('/api/webhooks', { headers: adminHeaders() }).then((r) =>
       json<{ endpoints: WebhookEndpoint[] }>(r),
     )
   },
@@ -966,7 +1208,7 @@ export const api = {
     events?: string[]
     enabled?: boolean
   }) {
-    return fetch('/api/webhooks', {
+    return req('/api/webhooks', {
       method: 'POST',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -982,25 +1224,25 @@ export const api = {
       enabled?: boolean
     },
   ) {
-    return fetch(`/api/webhooks/${encodeURIComponent(id)}`, {
+    return req(`/api/webhooks/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then((r) => json<WebhookEndpoint>(r))
   },
   deleteWebhook(id: string) {
-    return fetch(`/api/webhooks/${encodeURIComponent(id)}`, {
+    return req(`/api/webhooks/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: adminHeaders(),
     }).then((r) => json<{ ok: boolean }>(r))
   },
   webhookDeliveries(id: string, limit = 50) {
-    return fetch(`/api/webhooks/${encodeURIComponent(id)}/deliveries?limit=${limit}`, {
+    return req(`/api/webhooks/${encodeURIComponent(id)}/deliveries?limit=${limit}`, {
       headers: adminHeaders(),
     }).then((r) => json<{ deliveries: WebhookDelivery[] }>(r))
   },
   testWebhook(id: string) {
-    return fetch(`/api/webhooks/${encodeURIComponent(id)}/test`, {
+    return req(`/api/webhooks/${encodeURIComponent(id)}/test`, {
       method: 'POST',
       headers: adminHeaders(),
     }).then((r) => json<WebhookDelivery>(r))
