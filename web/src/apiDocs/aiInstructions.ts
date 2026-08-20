@@ -63,7 +63,7 @@ Do not invent URLs. Use only the endpoints below (or refresh from OpenAPI). Do n
 ## Hebrew overview (for the operator)
 
 זהו ממשק REST של ניהול בית הספר. כל פעולה שקיימת במסך הניהול זמינה גם ב־API.
-אימות: התחברות Google בממשק, או כותרת \`Authorization: Bearer <אסימון ניהול>\` לסקריפטים.
+אימות: התחברות Google בממשק, או אסימון מ־\`POST /api/admin/tokens\` בכותרת Bearer לסקריפטים.
 מסמכים אינטראקטיביים: ${origin}/api-docs
 מפרט OpenAPI: ${origin}/api/openapi.json
 וובהוקים: כל אירוע פעילות נשלח ב־POST JSON עם חתימת HMAC.
@@ -74,7 +74,8 @@ ${origin}
 
 ## Auth
 
-- Header: \`Authorization: Bearer <ADMIN_TOKENS>\` **or** a Google admin session cookie
+- Header: \`Authorization: Bearer <token>\` from \`POST /api/admin/tokens\` **or** a Google admin session cookie
+- Env \`ADMIN_TOKENS\` still works for local/scripts. Do not paste those into the browser.
 - Or HTTP Basic with the token as the password
 - Student portal routes are unauthenticated and scoped by enrollment id. Admin panel / MDM / activity / webhooks / purchases require auth.
 

@@ -64,13 +64,13 @@ func (a *API) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	a.auditAdmin(r, store.ActivityCategorySystem, "api_token_create", "נוצר אסימון API",
 		map[string]any{"token_id": tok.ID, "name": tok.Name, "prefix": tok.Prefix}, "", "")
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":          tok.ID,
-		"name":        tok.Name,
-		"prefix":      tok.Prefix,
-		"created_by":  tok.CreatedBy,
-		"created_at":  tok.CreatedAt,
-		"token":       raw,
-		"token_hint":  "Copy this token now. It is not shown again.",
+		"id":         tok.ID,
+		"name":       tok.Name,
+		"prefix":     tok.Prefix,
+		"created_by": tok.CreatedBy,
+		"created_at": tok.CreatedAt,
+		"token":      raw,
+		"token_hint": "Copy this token now. It is not shown again.",
 	})
 }
 

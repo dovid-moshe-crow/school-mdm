@@ -342,7 +342,7 @@ export default function DeviceAdmin() {
               showSearch
               optionFilterProp="label"
               placeholder={he.addToGroup}
-              value={null}
+              value={undefined}
               loading={!!groupBusy}
               style={{ width: '100%', maxWidth: 360 }}
               options={groups

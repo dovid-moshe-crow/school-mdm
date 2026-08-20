@@ -62,9 +62,9 @@ func (a *API) handleGetPack(w http.ResponseWriter, r *http.Request) {
 		assigns = []store.WhitelistPackAssignment{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pack":         p,
-		"items":        items,
-		"assignments":  assigns,
+		"pack":        p,
+		"items":       items,
+		"assignments": assigns,
 	})
 }
 

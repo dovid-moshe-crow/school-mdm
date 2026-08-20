@@ -18,7 +18,7 @@ type Service struct {
 	Store     store.Store
 	Enqueue   mdm.CommandEnqueuer
 	Push      *devicepush.Service // preferred reconcile path; falls back to Enqueue
-	Notify    *notify.Service    // optional Expo push for students
+	Notify    *notify.Service     // optional Expo push for students
 	PortalURL string
 	Credits   CreditSpender // optional; when set, access requests cost credits
 	// AsyncPush reconciles devices after approve without blocking the HTTP caller.

@@ -34,8 +34,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   api,
-  getAdminToken,
-  setAdminToken,
+  type APIToken,
   type OpenAPIOperation,
   type OpenAPIParameter,
   type OpenAPISpec,
@@ -295,8 +294,6 @@ function OperationCard({
       }
       const url = q.toString() ? `${path}?${q}` : path
       const headers: Record<string, string> = {}
-      const token = getAdminToken()
-      if (token) headers.Authorization = `Bearer ${token}`
       const init: RequestInit = { method: row.method.toUpperCase(), headers, credentials: 'include' }
       if (hasBody && row.method !== 'get') {
         headers['Content-Type'] = 'application/json'
@@ -820,10 +817,111 @@ function WebhooksTab({ lang }: { lang: Lang }) {
   )
 }
 
+function TokensTab({ lang }: { lang: Lang }) {
+  const ui = t[lang]
+  const { message, modal } = App.useApp()
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const listQuery = useQuery({ queryKey: ['api-tokens'], queryFn: () => api.apiTokens() })
+  const createMut = useMutation({
+    mutationFn: (n: string) => api.createAPIToken(n),
+    onSuccess: (tok) => {
+      void qc.invalidateQueries({ queryKey: ['api-tokens'] })
+      setName('')
+      modal.info({
+        title: ui.tokenCreated,
+        content: (
+          <Typography.Paragraph copyable style={{ marginBottom: 0 }} dir="ltr">
+            {tok.token}
+          </Typography.Paragraph>
+        ),
+      })
+    },
+    onError: (err: Error) => message.error(err.message),
+  })
+  const delMut = useMutation({
+    mutationFn: (id: string) => api.deleteAPIToken(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['api-tokens'] })
+      message.success(ui.deleted)
+    },
+    onError: (err: Error) => message.error(err.message),
+  })
+  const tokens = listQuery.data?.tokens ?? []
+
+  return (
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
+      <Alert type="info" showIcon message={ui.tabTokens} description={ui.tokensLead} />
+      <Flex gap={8} wrap="wrap">
+        <Input
+          style={{ width: 240 }}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={ui.tokenName}
+          onPressEnter={() => createMut.mutate(name.trim() || (lang === 'he' ? 'אסימון' : 'API token'))}
+        />
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          loading={createMut.isPending}
+          onClick={() => createMut.mutate(name.trim() || (lang === 'he' ? 'אסימון' : 'API token'))}
+        >
+          {ui.tokenCreate}
+        </Button>
+      </Flex>
+      <Table
+        size="small"
+        rowKey="id"
+        loading={listQuery.isLoading}
+        dataSource={tokens}
+        locale={{ emptyText: ui.tokenEmpty }}
+        pagination={false}
+        columns={[
+          { title: ui.tokenName, dataIndex: 'name' },
+          {
+            title: ui.tokenPrefix,
+            dataIndex: 'prefix',
+            render: (v: string) => (
+              <Typography.Text code dir="ltr">
+                {v}…
+              </Typography.Text>
+            ),
+          },
+          {
+            title: ui.tokenLastUsed,
+            dataIndex: 'last_used_at',
+            render: (v?: string) => (v ? new Date(v).toLocaleString() : ui.tokenNever),
+          },
+          {
+            title: lang === 'he' ? 'נוצר' : 'Created',
+            dataIndex: 'created_at',
+            render: (v: string) => (v ? new Date(v).toLocaleString() : ''),
+          },
+          {
+            title: '',
+            key: 'actions',
+            width: 100,
+            render: (_: unknown, row: APIToken) => (
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                loading={delMut.isPending && delMut.variables === row.id}
+                onClick={() => delMut.mutate(row.id)}
+              >
+                {ui.tokenRevoke}
+              </Button>
+            ),
+          },
+        ]}
+      />
+    </Space>
+  )
+}
+
 function ApiDocsInner() {
   const specQuery = useQuery({ queryKey: ['openapi'], queryFn: () => api.openapi() })
   const eventsQuery = useQuery({ queryKey: ['webhook-events'], queryFn: () => api.webhookEvents() })
-  const [tokenDraft, setTokenDraft] = useState(() => getAdminToken())
   const [lang, setLang] = useState<Lang>('he')
   const { message } = App.useApp()
   const ui = t[lang]
@@ -871,20 +969,7 @@ function ApiDocsInner() {
 
         <Card className="api-docs-toolbar" size="small">
           <Flex gap={8} wrap="wrap" align="center">
-            <Input.Password
-              style={{ width: 260 }}
-              value={tokenDraft}
-              onChange={(e) => setTokenDraft(e.target.value)}
-              placeholder={ui.token}
-            />
-            <Button
-              onClick={() => {
-                setAdminToken(tokenDraft.trim())
-                message.success(ui.tokenSaved)
-              }}
-            >
-              {ui.saveToken}
-            </Button>
+            <Typography.Text type="secondary">{ui.tokensLead}</Typography.Text>
             <Link to="/admin">
               <Button>{ui.admin}</Button>
             </Link>
@@ -911,6 +996,7 @@ function ApiDocsInner() {
                 <ReferenceTab spec={specQuery.data} lang={lang} origin={origin} />
               ),
             },
+            { key: 'tokens', label: ui.tabTokens, children: <TokensTab lang={lang} /> },
             { key: 'webhooks', label: ui.tabHooks, children: <WebhooksTab lang={lang} /> },
           ]}
         />
