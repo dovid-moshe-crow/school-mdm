@@ -67,6 +67,7 @@ import { PackEditor } from '../components/PackEditor'
 import { ProfileEditor } from '../components/ProfileEditor'
 import { RequestThread } from '../components/RequestThread'
 import { AdminTimers } from './AdminTimers'
+import { useBusy } from '../hooks/useBusy'
 import { useListSearch } from '../hooks/useListSearch'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
@@ -194,6 +195,7 @@ export default function Admin() {
   const navigate = useNavigate()
   const auth = useAdminAuth()
   const mdm = useMdmDeviceActions()
+  const action = useBusy()
 
   const [tab, setTab] = useQueryState(
     'tab',
@@ -349,19 +351,21 @@ export default function Admin() {
 
   async function runBulk(op: string, extra?: { group_id?: string; message?: string }) {
     if (!selectedIds.length) return
-    try {
-      const res = await api.mdmBulk({
-        enrollment_ids: selectedIds,
-        op,
-        ...extra,
-      })
-      const failed = res.results.filter((r) => !r.ok)
-      if (failed.length) message.error(failed.map((f) => `${f.id}: ${f.error}`).join('; '))
-      else message.success(he.ok)
-      void qc.invalidateQueries({ queryKey: ['devices'] })
-    } catch (err) {
-      message.error((err as Error).message)
-    }
+    await action.run('bulk-' + op, async () => {
+      try {
+        const res = await api.mdmBulk({
+          enrollment_ids: selectedIds,
+          op,
+          ...extra,
+        })
+        const failed = res.results.filter((r) => !r.ok)
+        if (failed.length) message.error(failed.map((f) => `${f.id}: ${f.error}`).join('; '))
+        else message.success(he.ok)
+        void qc.invalidateQueries({ queryKey: ['devices'] })
+      } catch (err) {
+        message.error((err as Error).message)
+      }
+    })
   }
 
   useEffect(() => {
@@ -1024,20 +1028,24 @@ export default function Admin() {
                   title={he.createGroup}
                   okText={he.createGroup}
                   okButtonProps={{ disabled: !newName.trim() }}
+                  confirmLoading={action.is('create-group')}
                   onCancel={() => setCreateGroupOpen(false)}
-                  onOk={async () => {
-                    try {
-                      const g = await api.createGroup(newName.trim(), newDesc.trim())
-                      setNewName('')
-                      setNewDesc('')
-                      setCreateGroupOpen(false)
-                      message.success(he.ok)
-                      await refreshMeta()
-                      await openGroup(g)
-                    } catch (e) {
-                      message.error((e as Error).message)
-                    }
-                  }}
+                  onOk={() =>
+                    action.run('create-group', async () => {
+                      try {
+                        const g = await api.createGroup(newName.trim(), newDesc.trim())
+                        setNewName('')
+                        setNewDesc('')
+                        setCreateGroupOpen(false)
+                        message.success(he.ok)
+                        await refreshMeta()
+                        await openGroup(g)
+                      } catch (e) {
+                        message.error((e as Error).message)
+                        throw e
+                      }
+                    })
+                  }
                 >
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <Input
@@ -1175,19 +1183,22 @@ export default function Admin() {
                                   descDraft.trim() !== (selectedGroup.description || '')) && (
                                   <Button
                                     type="primary"
-                                    onClick={async () => {
-                                      try {
-                                        await api.updateGroup(
-                                          selectedGroup.id,
-                                          renameDraft.trim() || selectedGroup.name,
-                                          descDraft.trim(),
-                                        )
-                                        message.success(he.ok)
-                                        void refreshMeta()
-                                      } catch (e) {
-                                        message.error((e as Error).message)
-                                      }
-                                    }}
+                                    loading={action.is('save-group')}
+                                    onClick={() =>
+                                      void action.run('save-group', async () => {
+                                        try {
+                                          await api.updateGroup(
+                                            selectedGroup.id,
+                                            renameDraft.trim() || selectedGroup.name,
+                                            descDraft.trim(),
+                                          )
+                                          message.success(he.ok)
+                                          void refreshMeta()
+                                        } catch (e) {
+                                          message.error((e as Error).message)
+                                        }
+                                      })
+                                    }
                                   >
                                     {he.saveGroup}
                                   </Button>
@@ -1218,31 +1229,36 @@ export default function Admin() {
                                   <Button
                                     type="primary"
                                     disabled={sameIds(members, membersQuery.data ?? [])}
-                                    onClick={async () => {
-                                      try {
-                                        setMembers(await api.setMembers(selectedGroup.id, members))
-                                        message.success(he.ok)
-                                        void refreshMeta()
-                                        void qc.invalidateQueries({
-                                          queryKey: ['group-members', selectedGroup.id],
-                                        })
-                                      } catch (e) {
-                                        message.error((e as Error).message)
-                                      }
-                                    }}
+                                    loading={action.is('save-members')}
+                                    onClick={() =>
+                                      void action.run('save-members', async () => {
+                                        try {
+                                          setMembers(await api.setMembers(selectedGroup.id, members))
+                                          message.success(he.ok)
+                                          void refreshMeta()
+                                          void qc.invalidateQueries({
+                                            queryKey: ['group-members', selectedGroup.id],
+                                          })
+                                        } catch (e) {
+                                          message.error((e as Error).message)
+                                        }
+                                      })
+                                    }
                                   >
                                     {he.saveMembers}
                                   </Button>
                                   <Button
                                     danger
+                                    loading={action.is('delete-group')}
                                     onClick={() => {
                                       modal.confirm({
                                         title: he.delete + '?',
-                                        onOk: async () => {
-                                          await api.deleteGroup(selectedGroup.id)
-                                          await setSelectedGroupId(null)
-                                          void refreshMeta()
-                                        },
+                                        onOk: () =>
+                                          action.run('delete-group', async () => {
+                                            await api.deleteGroup(selectedGroup.id)
+                                            await setSelectedGroupId(null)
+                                            void refreshMeta()
+                                          }),
                                       })
                                     }}
                                   >
@@ -1292,17 +1308,20 @@ export default function Admin() {
                           <Button
                             type="primary"
                             disabled={!newPackName.trim()}
-                            onClick={async () => {
-                              try {
-                                const p = await api.createPack(newPackName.trim())
-                                setNewPackName('')
-                                setSelectedPackId(p.id)
-                                message.success(he.ok)
-                                void qc.invalidateQueries({ queryKey: ['packs'] })
-                              } catch (err) {
-                                message.error((err as Error).message)
-                              }
-                            }}
+                            loading={action.is('create-pack')}
+                            onClick={() =>
+                              void action.run('create-pack', async () => {
+                                try {
+                                  const p = await api.createPack(newPackName.trim())
+                                  setNewPackName('')
+                                  setSelectedPackId(p.id)
+                                  message.success(he.ok)
+                                  void qc.invalidateQueries({ queryKey: ['packs'] })
+                                } catch (err) {
+                                  message.error((err as Error).message)
+                                }
+                              })
+                            }
                           >
                             {he.createPack}
                           </Button>
@@ -1339,16 +1358,19 @@ export default function Admin() {
                                 key="del"
                                 type="link"
                                 danger
-                                onClick={async () => {
-                                  try {
-                                    await api.deletePack(p.id)
-                                    if (selectedPackId === p.id) setSelectedPackId('')
-                                    message.success(he.ok)
-                                    void qc.invalidateQueries({ queryKey: ['packs'] })
-                                  } catch (err) {
-                                    message.error((err as Error).message)
-                                  }
-                                }}
+                                loading={action.is('del-pack-' + p.id)}
+                                onClick={() =>
+                                  void action.run('del-pack-' + p.id, async () => {
+                                    try {
+                                      await api.deletePack(p.id)
+                                      if (selectedPackId === p.id) setSelectedPackId('')
+                                      message.success(he.ok)
+                                      void qc.invalidateQueries({ queryKey: ['packs'] })
+                                    } catch (err) {
+                                      message.error((err as Error).message)
+                                    }
+                                  })
+                                }
                               >
                                 {he.delete}
                               </Button>,
@@ -1389,28 +1411,33 @@ export default function Admin() {
                         {he.profilesLead}
                       </Typography.Paragraph>
                       <Card size="small">
-                        <Upload.Dragger
-                          accept=".mobileconfig,.plist"
-                          maxCount={1}
-                          showUploadList={false}
-                          beforeUpload={async (file) => {
-                            try {
-                              const p = await api.createProfile(file)
-                              setSelectedProfileId(p.id)
-                              message.success(he.ok)
-                              void qc.invalidateQueries({ queryKey: ['profiles'] })
-                            } catch (err) {
-                              message.error((err as Error).message)
-                            }
-                            return false
-                          }}
-                        >
-                          <p className="ant-upload-drag-icon">
-                            <InboxOutlined />
-                          </p>
-                          <p className="ant-upload-text">{he.profileUpload}</p>
-                          <p className="ant-upload-hint">{he.profileUploadHint}</p>
-                        </Upload.Dragger>
+                        <Spin spinning={action.is('profile-upload')} tip={he.loading}>
+                          <Upload.Dragger
+                            accept=".mobileconfig,.plist"
+                            maxCount={1}
+                            showUploadList={false}
+                            disabled={action.locked}
+                            beforeUpload={(file) => {
+                              void action.run('profile-upload', async () => {
+                                try {
+                                  const p = await api.createProfile(file)
+                                  setSelectedProfileId(p.id)
+                                  message.success(he.ok)
+                                  void qc.invalidateQueries({ queryKey: ['profiles'] })
+                                } catch (err) {
+                                  message.error((err as Error).message)
+                                }
+                              })
+                              return false
+                            }}
+                          >
+                            <p className="ant-upload-drag-icon">
+                              <InboxOutlined />
+                            </p>
+                            <p className="ant-upload-text">{he.profileUpload}</p>
+                            <p className="ant-upload-hint">{he.profileUploadHint}</p>
+                          </Upload.Dragger>
+                        </Spin>
                       </Card>
                       <ListSearchBar
                         placeholder={he.searchProfiles}
@@ -1443,17 +1470,19 @@ export default function Admin() {
                                 key="del"
                                 type="link"
                                 danger
+                                loading={action.is('del-profile-' + p.id)}
                                 onClick={() => {
                                   modal.confirm({
                                     title: he.profileDeleteConfirm,
                                     okText: he.delete,
                                     okType: 'danger',
-                                    onOk: async () => {
-                                      await api.deleteProfile(p.id)
-                                      if (selectedProfileId === p.id) setSelectedProfileId('')
-                                      message.success(he.ok)
-                                      void qc.invalidateQueries({ queryKey: ['profiles'] })
-                                    },
+                                    onOk: () =>
+                                      action.run('del-profile-' + p.id, async () => {
+                                        await api.deleteProfile(p.id)
+                                        if (selectedProfileId === p.id) setSelectedProfileId('')
+                                        message.success(he.ok)
+                                        void qc.invalidateQueries({ queryKey: ['profiles'] })
+                                      }),
                                   })
                                 }}
                               >
@@ -1591,31 +1620,35 @@ export default function Admin() {
                           <Button
                             type="primary"
                             disabled={!urlPaste.trim()}
-                            onClick={async () => {
-                              const lines = urlPaste
-                                .split(/[\n,]+/)
-                                .map((s) => s.trim())
-                                .filter(Boolean)
-                              const scope = allowFilters.ascope === 'all' ? 'global' : allowFilters.ascope
-                              try {
-                                for (const line of lines) {
-                                  await api.createAllowance({
-                                    kind: 'url',
-                                    value: line,
-                                    scope,
-                                    group_id: scope === 'group' ? allowFilters.agroup : undefined,
-                                    enrollment_id:
-                                      scope === 'device' ? allowFilters.adevice : undefined,
-                                    duration: 'permanent',
-                                  })
+                            loading={action.is('paste-urls')}
+                            onClick={() =>
+                              void action.run('paste-urls', async () => {
+                                const lines = urlPaste
+                                  .split(/[\n,]+/)
+                                  .map((s) => s.trim())
+                                  .filter(Boolean)
+                                const scope =
+                                  allowFilters.ascope === 'all' ? 'global' : allowFilters.ascope
+                                try {
+                                  for (const line of lines) {
+                                    await api.createAllowance({
+                                      kind: 'url',
+                                      value: line,
+                                      scope,
+                                      group_id: scope === 'group' ? allowFilters.agroup : undefined,
+                                      enrollment_id:
+                                        scope === 'device' ? allowFilters.adevice : undefined,
+                                      duration: 'permanent',
+                                    })
+                                  }
+                                  setUrlPaste('')
+                                  message.success(he.ok)
+                                  void qc.invalidateQueries({ queryKey: ['allowances'] })
+                                } catch (err) {
+                                  message.error((err as Error).message)
                                 }
-                                setUrlPaste('')
-                                message.success(he.ok)
-                                void qc.invalidateQueries({ queryKey: ['allowances'] })
-                              } catch (err) {
-                                message.error((err as Error).message)
-                              }
-                            }}
+                              })
+                            }
                           >
                             {he.addAllow}
                           </Button>
@@ -1663,19 +1696,31 @@ export default function Admin() {
                               <Button
                                 danger
                                 size="small"
+                                loading={
+                                  action.is(
+                                    'revoke-' +
+                                      [row.kind, row.value, row.source, row.target_id || ''].join(
+                                        '-',
+                                      ),
+                                  )
+                                }
                                 onClick={() => {
+                                  const key =
+                                    'revoke-' +
+                                    [row.kind, row.value, row.source, row.target_id || ''].join('-')
                                   modal.confirm({
                                     title: he.revokeConfirm,
                                     content: appTitle(row.app, row.value),
-                                    onOk: async () => {
-                                      try {
-                                        await api.deleteAllowance(row)
-                                        message.success(he.ok)
-                                        void qc.invalidateQueries({ queryKey: ['allowances'] })
-                                      } catch (e) {
-                                        message.error((e as Error).message)
-                                      }
-                                    },
+                                    onOk: () =>
+                                      action.run(key, async () => {
+                                        try {
+                                          await api.deleteAllowance(row)
+                                          message.success(he.ok)
+                                          void qc.invalidateQueries({ queryKey: ['allowances'] })
+                                        } catch (e) {
+                                          message.error((e as Error).message)
+                                        }
+                                      }),
                                   })
                                 }}
                               >
@@ -1792,25 +1837,28 @@ export default function Admin() {
                         type="primary"
                         block
                         disabled={addKind === 'app' ? !addApp && !addValue.trim() : !addValue.trim()}
-                        onClick={async () => {
-                          try {
-                            await api.createAllowance({
-                              kind: addKind,
-                              value: addKind === 'app' ? addApp?.bundle_id || addValue : addValue,
-                              scope: addScope,
-                              duration: addDuration,
-                              group_id: addScope === 'group' ? addGroup : '',
-                              enrollment_id: addScope === 'device' ? addDevice : '',
-                            })
-                            message.success(he.ok)
-                            setAddValue('')
-                            setAddApp(null)
-                            setAddOpen(false)
-                            void qc.invalidateQueries({ queryKey: ['allowances'] })
-                          } catch (e) {
-                            message.error((e as Error).message)
-                          }
-                        }}
+                        loading={action.is('add-allow')}
+                        onClick={() =>
+                          void action.run('add-allow', async () => {
+                            try {
+                              await api.createAllowance({
+                                kind: addKind,
+                                value: addKind === 'app' ? addApp?.bundle_id || addValue : addValue,
+                                scope: addScope,
+                                duration: addDuration,
+                                group_id: addScope === 'group' ? addGroup : '',
+                                enrollment_id: addScope === 'device' ? addDevice : '',
+                              })
+                              message.success(he.ok)
+                              setAddValue('')
+                              setAddApp(null)
+                              setAddOpen(false)
+                              void qc.invalidateQueries({ queryKey: ['allowances'] })
+                            } catch (e) {
+                              message.error((e as Error).message)
+                            }
+                          })
+                        }
                       >
                         {he.addToAllow}
                       </Button>
@@ -1846,17 +1894,35 @@ export default function Admin() {
                         <Typography.Text style={{ flex: '1 1 100%' }}>
                           {he.bulkSelected}: {selectedIds.length}
                         </Typography.Text>
-                        <Button size="small" onClick={() => void runBulk('unrestricted')}>
+                        <Button
+                          size="small"
+                          loading={action.is('bulk-unrestricted')}
+                          disabled={action.busy.startsWith('bulk-') && !action.is('bulk-unrestricted')}
+                          onClick={() => void runBulk('unrestricted')}
+                        >
                           {he.bulkAllowAll}
                         </Button>
-                        <Button size="small" onClick={() => void runBulk('restrict')}>
+                        <Button
+                          size="small"
+                          loading={action.is('bulk-restrict')}
+                          disabled={action.busy.startsWith('bulk-') && !action.is('bulk-restrict')}
+                          onClick={() => void runBulk('restrict')}
+                        >
                           {he.bulkRestrict}
                         </Button>
-                        <Button size="small" danger onClick={() => void runBulk('lock')}>
+                        <Button
+                          size="small"
+                          danger
+                          loading={action.is('bulk-lock')}
+                          disabled={action.busy.startsWith('bulk-') && !action.is('bulk-lock')}
+                          onClick={() => void runBulk('lock')}
+                        >
                           {he.bulkLock}
                         </Button>
                         <Button
                           size="small"
+                          loading={action.is('bulk-restart')}
+                          disabled={action.busy.startsWith('bulk-') && !action.is('bulk-restart')}
                           onClick={() =>
                             Modal.confirm({
                               title: he.restartConfirm,
@@ -1868,6 +1934,10 @@ export default function Admin() {
                         </Button>
                         <Button
                           size="small"
+                          loading={action.is('bulk-clear-passcode')}
+                          disabled={
+                            action.busy.startsWith('bulk-') && !action.is('bulk-clear-passcode')
+                          }
                           onClick={() =>
                             Modal.confirm({
                               title: he.clearPasscodeConfirm,
@@ -1887,7 +1957,8 @@ export default function Admin() {
                         />
                         <Button
                           size="small"
-                          disabled={!bulkGroupId}
+                          disabled={!bulkGroupId || (action.busy.startsWith('bulk-') && !action.is('bulk-add-group'))}
+                          loading={action.is('bulk-add-group')}
                           onClick={() => void runBulk('add-group', { group_id: bulkGroupId })}
                         >
                           {he.bulkAddGroup}
@@ -1910,6 +1981,10 @@ export default function Admin() {
                             checkedChildren={isMobile ? '✓' : he.allowAll}
                             unCheckedChildren={isMobile ? '—' : he.allowAll}
                             checked={!!d.unrestricted}
+                            loading={
+                              unrestrictedMutation.isPending &&
+                              unrestrictedMutation.variables?.id === d.enrollment_id
+                            }
                             onChange={(on) =>
                               unrestrictedMutation.mutate({ id: d.enrollment_id, on })
                             }
@@ -2011,16 +2086,20 @@ export default function Admin() {
                             defaultValue={drawerDevice.name}
                             key={drawerDevice.enrollment_id + '-name'}
                             placeholder={drawerDevice.enrollment_id}
-                            onBlur={async (e) => {
+                            suffix={action.is('rename-device') ? <Spin size="small" /> : undefined}
+                            disabled={action.is('rename-device')}
+                            onBlur={(e) => {
                               const name = e.target.value.trim()
                               if (name === drawerDevice.name) return
-                              try {
-                                await api.setDeviceName(drawerDevice.enrollment_id, name)
-                                message.success(he.ok)
-                                void refreshMeta()
-                              } catch (err) {
-                                message.error((err as Error).message)
-                              }
+                              void action.run('rename-device', async () => {
+                                try {
+                                  await api.setDeviceName(drawerDevice.enrollment_id, name)
+                                  message.success(he.ok)
+                                  void refreshMeta()
+                                } catch (err) {
+                                  message.error((err as Error).message)
+                                }
+                              })
                             }}
                           />
                         </div>
@@ -2028,6 +2107,10 @@ export default function Admin() {
                           <Typography.Text strong>{he.allowAll}</Typography.Text>
                           <Switch
                             checked={!!drawerDevice.unrestricted}
+                            loading={
+                              unrestrictedMutation.isPending &&
+                              unrestrictedMutation.variables?.id === drawerDevice.enrollment_id
+                            }
                             onChange={(on) =>
                               unrestrictedMutation.mutate({
                                 id: drawerDevice.enrollment_id,
@@ -2230,41 +2313,46 @@ export default function Admin() {
                                 </Button>
                                 <Button
                                   size="small"
-                                  onClick={async () => {
-                                    try {
-                                      await api.adminUpdateAllotment(rule.id, {
-                                        enabled: !rule.enabled,
-                                      })
-                                      message.success(he.allotmentSaved)
-                                      void qc.invalidateQueries({
-                                        queryKey: ['admin-credit-allotments'],
-                                      })
-                                    } catch (err) {
-                                      message.error((err as Error).message)
-                                    }
-                                  }}
+                                  loading={action.is('allot-toggle-' + rule.id)}
+                                  onClick={() =>
+                                    void action.run('allot-toggle-' + rule.id, async () => {
+                                      try {
+                                        await api.adminUpdateAllotment(rule.id, {
+                                          enabled: !rule.enabled,
+                                        })
+                                        message.success(he.allotmentSaved)
+                                        void qc.invalidateQueries({
+                                          queryKey: ['admin-credit-allotments'],
+                                        })
+                                      } catch (err) {
+                                        message.error((err as Error).message)
+                                      }
+                                    })
+                                  }
                                 >
                                   {rule.enabled ? he.allotmentDisabled : he.allotmentEnabled}
                                 </Button>
                                 <Button
                                   size="small"
                                   danger
+                                  loading={action.is('allot-del-' + rule.id)}
                                   onClick={() => {
                                     modal.confirm({
                                       title: he.allotmentDeleteConfirm,
                                       okText: he.delete,
                                       cancelText: he.close,
-                                      onOk: async () => {
-                                        try {
-                                          await api.adminDeleteAllotment(rule.id)
-                                          message.success(he.allotmentDeleted)
-                                          void qc.invalidateQueries({
-                                            queryKey: ['admin-credit-allotments'],
-                                          })
-                                        } catch (err) {
-                                          message.error((err as Error).message)
-                                        }
-                                      },
+                                      onOk: () =>
+                                        action.run('allot-del-' + rule.id, async () => {
+                                          try {
+                                            await api.adminDeleteAllotment(rule.id)
+                                            message.success(he.allotmentDeleted)
+                                            void qc.invalidateQueries({
+                                              queryKey: ['admin-credit-allotments'],
+                                            })
+                                          } catch (err) {
+                                            message.error((err as Error).message)
+                                          }
+                                        }),
                                     })
                                   }}
                                 >
@@ -2328,22 +2416,24 @@ export default function Admin() {
                                   <Button
                                     size="small"
                                     danger
+                                    loading={action.is('pkg-off-' + pkg.id)}
                                     onClick={() => {
                                       modal.confirm({
                                         title: he.deactivatePackageConfirm,
                                         okText: he.deactivatePackage,
                                         cancelText: he.close,
-                                        onOk: async () => {
-                                          try {
-                                            await api.adminDeactivateCreditPackage(pkg.id)
-                                            message.success(he.packageSaved)
-                                            void qc.invalidateQueries({
-                                              queryKey: ['admin-credit-packages'],
-                                            })
-                                          } catch (err) {
-                                            message.error((err as Error).message)
-                                          }
-                                        },
+                                        onOk: () =>
+                                          action.run('pkg-off-' + pkg.id, async () => {
+                                            try {
+                                              await api.adminDeactivateCreditPackage(pkg.id)
+                                              message.success(he.packageSaved)
+                                              void qc.invalidateQueries({
+                                                queryKey: ['admin-credit-packages'],
+                                              })
+                                            } catch (err) {
+                                              message.error((err as Error).message)
+                                            }
+                                          }),
                                       })
                                     }}
                                   >

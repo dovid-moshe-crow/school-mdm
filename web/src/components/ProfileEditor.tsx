@@ -1,5 +1,5 @@
 import { DownloadOutlined, InboxOutlined } from '@ant-design/icons'
-import { App, Button, Card, Input, List, Segmented, Select, Space, Tag, Typography, Upload } from 'antd'
+import { App, Button, Card, Input, List, Segmented, Select, Space, Spin, Tag, Typography, Upload } from 'antd'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import {
@@ -32,6 +32,7 @@ export function ProfileEditor({
   const [description, setDescription] = useState(profile.description || '')
   const [assignScope, setAssignScope] = useState<'global' | 'group' | 'device'>('group')
   const [assignTarget, setAssignTarget] = useState('')
+  const [downloading, setDownloading] = useState(false)
 
   const saveMeta = useMutation({
     mutationFn: () => api.updateProfile(profileId, { name: name.trim(), description: description.trim() }),
@@ -129,11 +130,14 @@ export function ProfileEditor({
           </Typography.Text>
           <Button
             icon={<DownloadOutlined />}
-            onClick={() =>
+            loading={downloading}
+            onClick={() => {
+              setDownloading(true)
               void api
                 .downloadProfile(profileId, profile.filename || `${profile.payload_identifier}.mobileconfig`)
                 .catch((err: Error) => message.error(err.message))
-            }
+                .finally(() => setDownloading(false))
+            }}
           >
             {he.profileDownload}
           </Button>
@@ -148,9 +152,9 @@ export function ProfileEditor({
             }}
           >
             <p className="ant-upload-drag-icon">
-              <InboxOutlined />
+              {replaceFile.isPending ? <Spin /> : <InboxOutlined />}
             </p>
-            <p className="ant-upload-text">{he.profileReplace}</p>
+            <p className="ant-upload-text">{replaceFile.isPending ? he.loading : he.profileReplace}</p>
             <p className="ant-upload-hint">{he.profileUploadHint}</p>
           </Upload.Dragger>
         </Space>
@@ -222,6 +226,11 @@ export function ProfileEditor({
                           type="link"
                           danger
                           size="small"
+                          loading={
+                            removeAssignment.isPending &&
+                            removeAssignment.variables?.target_type === as.target_type &&
+                            removeAssignment.variables?.target_id === as.target_id
+                          }
                           onClick={() => removeAssignment.mutate(as)}
                         >
                           {he.removeOverride}

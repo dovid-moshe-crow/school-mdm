@@ -231,6 +231,11 @@ export function PackEditor({
                           type="link"
                           danger
                           size="small"
+                          loading={
+                            removeItem.isPending &&
+                            removeItem.variables?.itemKind === 'url' &&
+                            removeItem.variables?.value === it.value
+                          }
                           onClick={() => removeItem.mutate({ itemKind: 'url', value: it.value })}
                         >
                           {he.removeOverride}
@@ -317,6 +322,11 @@ export function PackEditor({
                           type="link"
                           danger
                           size="small"
+                          loading={
+                            removeAssignment.isPending &&
+                            removeAssignment.variables?.target_type === as.target_type &&
+                            removeAssignment.variables?.target_id === as.target_id
+                          }
                           onClick={() => removeAssignment.mutate(as)}
                         >
                           {he.removeOverride}

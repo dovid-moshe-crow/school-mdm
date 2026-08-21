@@ -364,6 +364,7 @@ export default function Portal() {
   const [iframeUrl, setIframeUrl] = useState('')
   const [pendingPurchaseId, setPendingPurchaseId] = useState('')
   const [checkingOut, setCheckingOut] = useState(false)
+  const [checkoutPkgId, setCheckoutPkgId] = useState('')
   const [updatesSeenAt, setUpdatesSeenAt] = useState(() => {
     try {
       const raw = localStorage.getItem(updatesSeenKey(deviceId))
@@ -529,6 +530,7 @@ export default function Portal() {
   }
 
   async function submit() {
+    if (submitting) return
     if (needsCredits) {
       setBuyOpen(true)
       message.warning(he.insufficientCredits)
@@ -568,7 +570,9 @@ export default function Portal() {
   }
 
   async function startCheckout(pkg: CreditPackage) {
+    if (checkingOut) return
     setCheckingOut(true)
+    setCheckoutPkgId(pkg.id)
     try {
       const res = await api.creditCheckout(deviceId, pkg.id)
       setPendingPurchaseId(res.purchase_id)
@@ -579,6 +583,7 @@ export default function Portal() {
       message.error((err as Error).message)
     } finally {
       setCheckingOut(false)
+      setCheckoutPkgId('')
     }
   }
 
@@ -1090,7 +1095,8 @@ export default function Portal() {
                 <Button
                   type="primary"
                   block={isMobile}
-                  loading={checkingOut}
+                  disabled={checkingOut}
+                  loading={checkingOut && checkoutPkgId === pkg.id}
                   onClick={() => void startCheckout(pkg)}
                 >
                   {he.payNow}

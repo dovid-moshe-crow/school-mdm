@@ -26,6 +26,12 @@ func Known(bundleID string) (store.AppMeta, bool) {
 	}, true
 }
 
+// KnownName is the Hebrew/friendly title for a well-known bundle ID.
+func KnownName(bundleID string) (string, bool) {
+	n, ok := knownNames[policy.AppKey(bundleID)]
+	return n, ok
+}
+
 // SearchKnown returns built-in system/companion apps matching query (name or bundle id).
 func SearchKnown(query string) []store.AppMeta {
 	q := strings.ToLower(strings.TrimSpace(query))

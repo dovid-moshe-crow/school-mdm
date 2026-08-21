@@ -31,6 +31,7 @@ import { DeviceActionModals } from '../components/DeviceActionModals'
 import { DeviceMdmActions } from '../components/DeviceMdmActions'
 import { SearchableCollection } from '../components/ListSearch'
 import { deviceStatusFromInfo } from '../components/MdmCommandResultView'
+import { useBusy } from '../hooks/useBusy'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMdmDeviceActions } from '../hooks/useMdmDeviceActions'
 import { he } from '../he'
@@ -59,6 +60,8 @@ export default function DeviceAdmin() {
   const [statusLoading, setStatusLoading] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
   const [groupBusy, setGroupBusy] = useState('')
+  const action = useBusy()
+  const [nameSaving, setNameSaving] = useState(false)
 
   const mdm = useMdmDeviceActions()
 
@@ -143,40 +146,44 @@ export default function DeviceAdmin() {
       .map((s) => s.trim())
       .filter(Boolean)
     if (!lines.length) return
-    try {
-      for (const line of lines) {
+    await action.run('add-url', async () => {
+      try {
+        for (const line of lines) {
+          await api.createAllowance({
+            kind: 'url',
+            value: line,
+            scope: 'device',
+            enrollment_id: deviceId,
+            duration: 'permanent',
+          })
+        }
+        setUrlDraft('')
+        message.success(he.ok)
+        void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
+        void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
+      } catch (err) {
+        message.error((err as Error).message)
+      }
+    })
+  }
+
+  async function addApp(app: AppMeta) {
+    await action.run('add-app-' + app.bundle_id, async () => {
+      try {
         await api.createAllowance({
-          kind: 'url',
-          value: line,
+          kind: 'app',
+          value: app.bundle_id,
           scope: 'device',
           enrollment_id: deviceId,
           duration: 'permanent',
         })
+        message.success(he.ok)
+        void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
+        void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
+      } catch (err) {
+        message.error((err as Error).message)
       }
-      setUrlDraft('')
-      message.success(he.ok)
-      void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
-      void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
-    } catch (err) {
-      message.error((err as Error).message)
-    }
-  }
-
-  async function addApp(app: AppMeta) {
-    try {
-      await api.createAllowance({
-        kind: 'app',
-        value: app.bundle_id,
-        scope: 'device',
-        enrollment_id: deviceId,
-        duration: 'permanent',
-      })
-      message.success(he.ok)
-      void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
-      void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
-    } catch (err) {
-      message.error((err as Error).message)
-    }
+    })
   }
 
   async function addToGroup(groupId: string) {
@@ -210,14 +217,17 @@ export default function DeviceAdmin() {
   }
 
   async function revokeRow(row: Allowance) {
-    try {
-      await api.deleteAllowance(row)
-      message.success(he.ok)
-      void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
-      void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
-    } catch (err) {
-      message.error((err as Error).message)
-    }
+    const key = 'revoke-' + [row.kind, row.value, row.source].join('-')
+    await action.run(key, async () => {
+      try {
+        await api.deleteAllowance(row)
+        message.success(he.ok)
+        void qc.invalidateQueries({ queryKey: ['allowances', 'device', deviceId] })
+        void qc.invalidateQueries({ queryKey: ['effective-allowlist', deviceId] })
+      } catch (err) {
+        message.error((err as Error).message)
+      }
+    })
   }
 
   if (devicesQuery.isLoading) {
@@ -270,15 +280,20 @@ export default function DeviceAdmin() {
                 defaultValue={device.name}
                 key={device.enrollment_id + '-name'}
                 placeholder={he.nickname}
+                suffix={nameSaving ? <Spin size="small" /> : undefined}
+                disabled={nameSaving}
                 onBlur={async (e) => {
                   const name = e.target.value.trim()
                   if (name === device.name) return
+                  setNameSaving(true)
                   try {
                     await api.setDeviceName(device.enrollment_id, name)
                     message.success(he.ok)
                     void qc.invalidateQueries({ queryKey: ['devices'] })
                   } catch (err) {
                     message.error((err as Error).message)
+                  } finally {
+                    setNameSaving(false)
                   }
                 }}
               />
@@ -323,7 +338,7 @@ export default function DeviceAdmin() {
                   return (
                     <Tag
                       key={gid}
-                      closable
+                      closable={!groupBusy}
                       color="blue"
                       onClose={(e) => {
                         e.preventDefault()
@@ -414,6 +429,7 @@ export default function DeviceAdmin() {
             </div>
             <Switch
               checked={!!device.unrestricted}
+              loading={unrestrictedMutation.isPending}
               onChange={(on) => unrestrictedMutation.mutate({ id: device.enrollment_id, on })}
             />
           </Flex>
@@ -472,7 +488,14 @@ export default function DeviceAdmin() {
                       renderItem={(row) => (
                   <List.Item
                     actions={[
-                      <Button key="rev" type="link" danger size="small" onClick={() => void revokeRow(row)}>
+                      <Button
+                        key="rev"
+                        type="link"
+                        danger
+                        size="small"
+                        loading={action.is('revoke-' + [row.kind, row.value, row.source].join('-'))}
+                        onClick={() => void revokeRow(row)}
+                      >
                         {he.revoke}
                       </Button>,
                     ]}
@@ -505,7 +528,14 @@ export default function DeviceAdmin() {
                       renderItem={(row) => (
                   <List.Item
                     actions={[
-                      <Button key="rev" type="link" danger size="small" onClick={() => void revokeRow(row)}>
+                      <Button
+                        key="rev"
+                        type="link"
+                        danger
+                        size="small"
+                        loading={action.is('revoke-' + [row.kind, row.value, row.source].join('-'))}
+                        onClick={() => void revokeRow(row)}
+                      >
                         {he.revoke}
                       </Button>,
                     ]}
@@ -524,7 +554,14 @@ export default function DeviceAdmin() {
                 onChange={(e) => setUrlDraft(e.target.value)}
                 placeholder={he.pasteUrlsHint}
               />
-              <Button type="primary" style={{ marginTop: 8 }} block={isMobile} onClick={() => void addUrl()}>
+              <Button
+                type="primary"
+                style={{ marginTop: 8 }}
+                block={isMobile}
+                loading={action.is('add-url')}
+                disabled={!urlDraft.trim()}
+                onClick={() => void addUrl()}
+              >
                 {he.addToAllow}
               </Button>
             </div>

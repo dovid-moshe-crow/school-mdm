@@ -51,6 +51,7 @@ export function DeviceActionModals({
         okText={he.ok}
         cancelText={he.close}
         confirmLoading={mdmBusy === enrollmentId + ':lost-on'}
+        maskClosable={mdmBusy !== enrollmentId + ':lost-on'}
         onOk={async () => {
           setMdmBusy(enrollmentId + ':lost-on')
           try {
@@ -95,6 +96,7 @@ export function DeviceActionModals({
         cancelText={he.close}
         okButtonProps={{ danger: true, disabled: eraseTyped !== 'ERASE' }}
         confirmLoading={mdmBusy === enrollmentId + ':erase'}
+        maskClosable={mdmBusy !== enrollmentId + ':erase'}
         onOk={async () => {
           setMdmBusy(enrollmentId + ':erase')
           try {

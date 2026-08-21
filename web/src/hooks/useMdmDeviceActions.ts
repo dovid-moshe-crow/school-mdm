@@ -1,15 +1,21 @@
 import { App, Modal } from 'antd'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { api, type MdmCommandResult } from '../api'
 import { he } from '../he'
 
 export function useMdmDeviceActions() {
   const { message } = App.useApp()
-  const [mdmBusy, setMdmBusy] = useState('')
+  const [mdmBusy, setMdmBusyState] = useState('')
+  const busyRef = useRef('')
   const [mdmInfoOpen, setMdmInfoOpen] = useState(false)
   const [mdmInfoWaiting, setMdmInfoWaiting] = useState(false)
   const [mdmInfoTitle, setMdmInfoTitle] = useState('')
   const [mdmInfoResult, setMdmInfoResult] = useState<MdmCommandResult | null>(null)
+
+  const setMdmBusy = useCallback((v: string) => {
+    busyRef.current = v
+    setMdmBusyState(v)
+  }, [])
 
   const queueDeviceAction = useCallback(
     async (
@@ -18,30 +24,48 @@ export function useMdmDeviceActions() {
       fn: () => Promise<unknown>,
       confirm?: { title: string; content?: string },
     ) => {
+      if (busyRef.current) return
+      const token = id + ':' + key
       const run = async () => {
-        setMdmBusy(id + ':' + key)
+        setMdmBusy(token)
         try {
           await fn()
           message.success(he.ok)
         } catch (err) {
           message.error((err as Error).message)
+          throw err
         } finally {
           setMdmBusy('')
         }
       }
       if (confirm) {
+        setMdmBusy(token)
         Modal.confirm({
           title: confirm.title,
           content: confirm.content,
           okText: he.ok,
           cancelText: he.close,
-          onOk: run,
+          onOk: async () => {
+            try {
+              await fn()
+              message.success(he.ok)
+              setMdmBusy('')
+            } catch (err) {
+              message.error((err as Error).message)
+              throw err
+            }
+          },
+          onCancel: () => setMdmBusy(''),
         })
         return
       }
-      await run()
+      try {
+        await run()
+      } catch {
+        // error already toasted
+      }
     },
-    [message],
+    [message, setMdmBusy],
   )
 
   const queueAndPollResult = useCallback(
@@ -52,6 +76,7 @@ export function useMdmDeviceActions() {
       enqueue: () => Promise<{ command_uuid: string }>,
       opts?: { silent?: boolean },
     ) => {
+      if (busyRef.current) return null
       setMdmBusy(id + ':' + label)
       setMdmInfoTitle(title)
       setMdmInfoResult(null)
@@ -81,7 +106,7 @@ export function useMdmDeviceActions() {
         setMdmBusy('')
       }
     },
-    [message],
+    [message, setMdmBusy],
   )
 
   /** Poll DeviceInformation without opening the result modal (for status chips). */

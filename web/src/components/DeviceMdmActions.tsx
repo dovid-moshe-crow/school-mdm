@@ -36,7 +36,12 @@ export function DeviceMdmActions({
   const id = device.enrollment_id
   const title = device.serial_number || device.name || device.enrollment_id
   const mdm = !!device.mdm
+  const deviceBusy = mdmBusy.startsWith(id + ':')
   const busy = (key: string) => mdmBusy === id + ':' + key
+  const propsFor = (key: string) => ({
+    disabled: !mdm || (deviceBusy && !busy(key)),
+    loading: busy(key),
+  })
 
   return (
     <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -44,8 +49,7 @@ export function DeviceMdmActions({
         <Button
           size="small"
           danger
-          disabled={!mdm}
-          loading={busy('lock')}
+          {...propsFor('lock')}
           onClick={() =>
             void queueDeviceAction(
               id,
@@ -59,8 +63,7 @@ export function DeviceMdmActions({
         </Button>
         <Button
           size="small"
-          disabled={!mdm}
-          loading={busy('pass')}
+          {...propsFor('pass')}
           onClick={() =>
             void queueDeviceAction(id, 'pass', () => api.mdmClearPasscode(id), {
               title: he.clearPasscodeConfirm,
@@ -71,8 +74,7 @@ export function DeviceMdmActions({
         </Button>
         <Button
           size="small"
-          disabled={!mdm}
-          loading={busy('restart')}
+          {...propsFor('restart')}
           onClick={() =>
             void queueDeviceAction(id, 'restart', () => api.mdmRestart(id), {
               title: he.restartConfirm,
@@ -83,8 +85,7 @@ export function DeviceMdmActions({
         </Button>
         <Button
           size="small"
-          disabled={!mdm}
-          loading={busy('off')}
+          {...propsFor('off')}
           onClick={() =>
             void queueDeviceAction(id, 'off', () => api.mdmShutDown(id), {
               title: he.shutDownConfirm,
@@ -97,13 +98,17 @@ export function DeviceMdmActions({
 
       <Typography.Text type="secondary">{he.lostMode}</Typography.Text>
       <div className="action-btn-grid">
-        <Button size="small" disabled={!mdm} onClick={onOpenLostMode}>
+        <Button
+          size="small"
+          disabled={!mdm || deviceBusy}
+          loading={busy('lost-on')}
+          onClick={onOpenLostMode}
+        >
           {he.enableLostMode}
         </Button>
         <Button
           size="small"
-          disabled={!mdm}
-          loading={busy('lost-off')}
+          {...propsFor('lost-off')}
           onClick={() =>
             void queueDeviceAction(id, 'lost-off', () => api.mdmDisableLostMode(id))
           }
@@ -113,8 +118,7 @@ export function DeviceMdmActions({
         {variant === 'full' ? (
           <Button
             size="small"
-            disabled={!mdm}
-            loading={busy('sound')}
+            {...propsFor('sound')}
             onClick={() =>
               void queueDeviceAction(id, 'sound', () => api.mdmPlayLostModeSound(id))
             }
@@ -124,8 +128,7 @@ export function DeviceMdmActions({
         ) : null}
         <Button
           size="small"
-          disabled={!mdm}
-          loading={busy('loc')}
+          {...propsFor('loc')}
           onClick={() =>
             void queueAndPollResult(id, 'loc', title, () => api.mdmDeviceLocation(id))
           }
@@ -140,8 +143,7 @@ export function DeviceMdmActions({
           <div className="action-btn-grid">
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('info')}
+              {...propsFor('info')}
               onClick={() =>
                 void queueAndPollResult(id, 'info', title, () => api.mdmDeviceInformation(id))
               }
@@ -150,8 +152,7 @@ export function DeviceMdmActions({
             </Button>
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('sec')}
+              {...propsFor('sec')}
               onClick={() =>
                 void queueAndPollResult(id, 'sec', title, () => api.mdmSecurityInfo(id))
               }
@@ -160,8 +161,7 @@ export function DeviceMdmActions({
             </Button>
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('apps')}
+              {...propsFor('apps')}
               onClick={() =>
                 void queueAndPollResult(id, 'apps', title, () => api.mdmInstalledApps(id))
               }
@@ -170,8 +170,7 @@ export function DeviceMdmActions({
             </Button>
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('profiles')}
+              {...propsFor('profiles')}
               onClick={() =>
                 void queueAndPollResult(id, 'profiles', title, () => api.mdmProfileList(id))
               }
@@ -180,8 +179,7 @@ export function DeviceMdmActions({
             </Button>
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('companion-cfg')}
+              {...propsFor('companion-cfg')}
               onClick={() =>
                 void queueDeviceAction(id, 'companion-cfg', () => api.mdmConfigureCompanion(id))
               }
@@ -190,8 +188,7 @@ export function DeviceMdmActions({
             </Button>
             <Button
               size="small"
-              disabled={!mdm}
-              loading={busy('companion')}
+              {...propsFor('companion')}
               onClick={() =>
                 void queueDeviceAction(id, 'companion', () => api.mdmInstallCompanion(id))
               }
@@ -199,12 +196,26 @@ export function DeviceMdmActions({
               {he.companionPush}
             </Button>
           </div>
-          <Button size="small" danger block disabled={!mdm} onClick={onOpenErase}>
+          <Button
+            size="small"
+            danger
+            block
+            disabled={!mdm || deviceBusy}
+            loading={busy('erase')}
+            onClick={onOpenErase}
+          >
             {he.eraseDevice}
           </Button>
         </>
       ) : (
-        <Button size="small" danger block disabled={!mdm} onClick={onOpenErase}>
+        <Button
+          size="small"
+          danger
+          block
+          disabled={!mdm || deviceBusy}
+          loading={busy('erase')}
+          onClick={onOpenErase}
+        >
           {he.eraseDevice}
         </Button>
       )}

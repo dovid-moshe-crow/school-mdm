@@ -1,3 +1,5 @@
+import type { AppMeta } from './api'
+
 const knownNames: Record<string, string> = {
   'com.apple.mobilesafari': 'Safari',
   'com.apple.webapp': 'אפליקציית אינטרנט',
@@ -52,10 +54,10 @@ export function looksLikeBundleId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z0-9.-]+$/.test(s) && !s.includes(' ')
 }
 
-export function knownAppsMatching(query: string): { bundle_id: string; app_name: string; developer: string; source: string }[] {
+export function knownAppsMatching(query: string): AppMeta[] {
   const needle = query.trim().toLowerCase()
   if (!needle) return []
-  const out: { bundle_id: string; app_name: string; developer: string; source: string }[] = []
+  const out: AppMeta[] = []
   for (const [id, name] of Object.entries(knownNames)) {
     if (id.includes(needle) || name.toLowerCase().includes(needle)) {
       out.push({ bundle_id: id, app_name: name, developer: 'Apple', source: 'local' })

@@ -105,6 +105,7 @@ function AdminLoginPage() {
   const auth = useAdminAuth()
   const loc = useLocation()
   const navigate = useNavigate()
+  const [googleBusy, setGoogleBusy] = useState(false)
   const params = new URLSearchParams(loc.search)
   const err = params.get('error')
   const next = loc.pathname.startsWith('/admin') || loc.pathname.startsWith('/api-docs')
@@ -112,6 +113,7 @@ function AdminLoginPage() {
     : '/admin'
 
   function googleStart() {
+    setGoogleBusy(true)
     window.location.href = `/api/auth/google/start?next=${encodeURIComponent(next || '/admin')}`
   }
 
@@ -131,7 +133,7 @@ function AdminLoginPage() {
             <Alert type="error" showIcon message={loginErrorText(err)} />
           ) : null}
           {auth.google ? (
-            <Button type="primary" size="large" block onClick={googleStart}>
+            <Button type="primary" size="large" block loading={googleBusy} onClick={googleStart}>
               {he.adminLoginGoogle}
             </Button>
           ) : (
@@ -150,6 +152,12 @@ function AdminLoginPage() {
 
 function TokenLoginForm({ onSave }: { onSave: (token: string) => void }) {
   const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  function save() {
+    if (!token.trim() || busy) return
+    setBusy(true)
+    onSave(token)
+  }
   return (
     <Space direction="vertical" style={{ width: '100%' }}>
       <Typography.Text type="secondary">{he.adminLoginTokenHint}</Typography.Text>
@@ -157,9 +165,9 @@ function TokenLoginForm({ onSave }: { onSave: (token: string) => void }) {
         value={token}
         placeholder="dev-admin-token"
         onChange={(e) => setToken(e.target.value)}
-        onPressEnter={() => onSave(token)}
+        onPressEnter={save}
       />
-      <Button type="primary" block disabled={!token.trim()} onClick={() => onSave(token)}>
+      <Button type="primary" block disabled={!token.trim()} loading={busy} onClick={save}>
         {he.adminLoginToken}
       </Button>
     </Space>

@@ -47,12 +47,13 @@ func TestCustomProfileCRUDAndAssign(t *testing.T) {
 	stub := &mdm.StubEnqueuer{}
 	push := &devicepush.Service{Store: mem, Enqueue: stub, PortalURL: "https://example.test"}
 	api := &API{
-		Cfg:      config.Config{AdminTokens: []string{"dev-admin-token"}},
-		Store:    mem,
-		Activity: &activity.Logger{Store: mem},
-		Push:     push,
-		Enqueue:  stub,
-		Timers:   &timers.Service{Store: mem, Push: push},
+		Cfg:            config.Config{AdminTokens: []string{"dev-admin-token"}},
+		Store:          mem,
+		Activity:       &activity.Logger{Store: mem},
+		Push:           push,
+		Enqueue:        stub,
+		Timers:         &timers.Service{Store: mem, Push: push},
+		ForegroundJobs: true,
 	}
 	mux := http.NewServeMux()
 	api.Mount(mux)

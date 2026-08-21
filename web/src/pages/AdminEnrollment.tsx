@@ -625,7 +625,9 @@ export default function AdminEnrollment() {
             <Upload
               accept=".vpptoken,.txt,.json,.p7m,*"
               showUploadList={false}
+              disabled={!!busy}
               beforeUpload={async (file) => {
+                setBusy('vpp-upload')
                 try {
                   const text = await file.text()
                   await api.uploadVppToken(text, file.name)
@@ -633,23 +635,31 @@ export default function AdminEnrollment() {
                   void qc.invalidateQueries({ queryKey: ['abm-settings'] })
                 } catch (err) {
                   message.error((err as Error).message)
+                } finally {
+                  setBusy('')
                 }
                 return false
               }}
             >
-              <Button size="small">{he.vppTokenUpload}</Button>
+              <Button size="small" loading={busy === 'vpp-upload'}>
+                {he.vppTokenUpload}
+              </Button>
             </Upload>
             <Button
               size="small"
               danger
-              disabled={!abmSettingsQuery.data?.has_vpp_token}
+              disabled={!abmSettingsQuery.data?.has_vpp_token || (!!busy && busy !== 'vpp-clear')}
+              loading={busy === 'vpp-clear'}
               onClick={async () => {
+                setBusy('vpp-clear')
                 try {
                   await api.deleteVppToken()
                   message.success(he.ok)
                   void qc.invalidateQueries({ queryKey: ['abm-settings'] })
                 } catch (err) {
                   message.error((err as Error).message)
+                } finally {
+                  setBusy('')
                 }
               }}
             >

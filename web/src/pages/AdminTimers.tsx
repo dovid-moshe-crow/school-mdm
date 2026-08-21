@@ -37,6 +37,7 @@ import {
   type WhitelistPack,
 } from '../api'
 import { DevicePickList, GroupPickList, PackPickList, ProfilePickList } from '../components/CheckablePickList'
+import { useBusy } from '../hooks/useBusy'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { he } from '../he'
 import { deviceLabel } from '../labels'
@@ -110,6 +111,7 @@ export function AdminTimers({
   const { message, modal } = App.useApp()
   const qc = useQueryClient()
   const isMobile = useIsMobile()
+  const action = useBusy()
   const [editing, setEditing] = useState<PolicyTimer | 'new' | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
 
@@ -252,46 +254,54 @@ export function AdminTimers({
                     <Space onClick={(e) => e.stopPropagation()}>
                       <Switch
                         checked={t.enabled}
-                        onChange={async (on) => {
-                          try {
-                            await api.updateTimer(t.id, { enabled: on })
-                            void qc.invalidateQueries({ queryKey: ['timers'] })
-                          } catch (err) {
-                            message.error((err as Error).message)
-                          }
-                        }}
+                        loading={action.is('timer-en-' + t.id)}
+                        onChange={(on) =>
+                          void action.run('timer-en-' + t.id, async () => {
+                            try {
+                              await api.updateTimer(t.id, { enabled: on })
+                              void qc.invalidateQueries({ queryKey: ['timers'] })
+                            } catch (err) {
+                              message.error((err as Error).message)
+                            }
+                          })
+                        }
                       />
                       <Button
                         icon={<PlayCircleOutlined />}
-                        onClick={async () => {
-                          try {
-                            const res = await api.runTimer(t.id)
-                            message.success(
-                              `${he.timerRan} · ${res.assignments}/${res.devices}${res.errors ? ` · ${res.errors}` : ''}`,
-                            )
-                            void qc.invalidateQueries({ queryKey: ['timers'] })
-                            void qc.invalidateQueries({ queryKey: ['packs'] })
-                            void qc.invalidateQueries({ queryKey: ['profiles'] })
-                          } catch (err) {
-                            message.error((err as Error).message)
-                          }
-                        }}
+                        loading={action.is('timer-run-' + t.id)}
+                        onClick={() =>
+                          void action.run('timer-run-' + t.id, async () => {
+                            try {
+                              const res = await api.runTimer(t.id)
+                              message.success(
+                                `${he.timerRan} · ${res.assignments}/${res.devices}${res.errors ? ` · ${res.errors}` : ''}`,
+                              )
+                              void qc.invalidateQueries({ queryKey: ['timers'] })
+                              void qc.invalidateQueries({ queryKey: ['packs'] })
+                              void qc.invalidateQueries({ queryKey: ['profiles'] })
+                            } catch (err) {
+                              message.error((err as Error).message)
+                            }
+                          })
+                        }
                       >
                         {he.timerRunNow}
                       </Button>
                       <Button
                         danger
                         icon={<DeleteOutlined />}
+                        loading={action.is('timer-del-' + t.id)}
                         onClick={() => {
                           modal.confirm({
                             title: he.timerDeleteConfirm,
                             okText: he.delete,
                             okType: 'danger',
-                            onOk: async () => {
-                              await api.deleteTimer(t.id)
-                              message.success(he.timerDeleted)
-                              void qc.invalidateQueries({ queryKey: ['timers'] })
-                            },
+                            onOk: () =>
+                              action.run('timer-del-' + t.id, async () => {
+                                await api.deleteTimer(t.id)
+                                message.success(he.timerDeleted)
+                                void qc.invalidateQueries({ queryKey: ['timers'] })
+                              }),
                           })
                         }}
                       />
